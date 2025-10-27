@@ -251,14 +251,34 @@ def generate_transcript(
         header = f"\n\n--- {clip_label} ---\n"
 
     t = db.get(Transcript, video_id)
+    new_text = ""
     if t:
-        t.text = (t.text or "") + header + text
+        old_text = getattr(t, 'text', None) or ""
+        new_text = old_text + header + text
+        setattr(t, 'text', new_text)
     else:
-        t = Transcript(video_id=video_id, text=(header + text).lstrip())
+        new_text = (header + text).lstrip()
+        t = Transcript(video_id=video_id)
+        setattr(t, 'text', new_text)
         db.add(t)
+    
+    # Generate and store embedding
+    from .embeddings import embed_text, combine_text_for_embedding
+    desc_val = getattr(v, 'description', None)
+    desc_str = str(desc_val) if desc_val is not None else None
+    combined_text = combine_text_for_embedding(new_text, desc_str)
+    print(f"[transcribe] generating embedding for {len(combined_text)} chars")
+    embedding = embed_text(combined_text)
+    setattr(t, 'embedding', embedding)
+    
     db.commit()
 
-    return TranscriptOut(video_id=video_id, title=v.title, url=v.url, media_path=v.media_path, text=t.text)
+    # Convert to proper types for response
+    v_title = str(getattr(v, 'title', '')) if getattr(v, 'title', None) else None
+    v_url = str(getattr(v, 'url', ''))
+    v_media_path = str(getattr(v, 'media_path', '')) if getattr(v, 'media_path', None) else None
+
+    return TranscriptOut(video_id=video_id, title=v_title, url=v_url, media_path=v_media_path, text=new_text)
 
 
 
@@ -276,13 +296,19 @@ def get_transcript(video_id: str, db: Session = Depends(get_db)):
         _log("[get_transcript] 404 transcript not found")
         raise HTTPException(404, "Transcript not found")
 
-    _log(f"[get_transcript] ok chars={len(t.text or '')}")
+    t_text = str(getattr(t, 'text', ''))
+    _log(f"[get_transcript] ok chars={len(t_text)}")
+    
+    v_title = str(getattr(v, 'title', '')) if getattr(v, 'title', None) else None
+    v_url = str(getattr(v, 'url', ''))
+    v_media_path = str(getattr(v, 'media_path', '')) if getattr(v, 'media_path', None) else None
+    
     return TranscriptOut(
         video_id=video_id,
-        title=v.title,
-        url=v.url,
-        media_path=v.media_path,
-        text=t.text,
+        title=v_title,
+        url=v_url,
+        media_path=v_media_path,
+        text=t_text,
     )
 
 
@@ -296,14 +322,25 @@ def put_transcript(video_id: str, payload: TranscriptUpdate, db: Session = Depen
         raise HTTPException(404, "Video not found")
 
     try:
+        # Generate embedding for the transcript + caption
+        from .embeddings import embed_text, combine_text_for_embedding
+        desc_val = getattr(v, 'description', None)
+        desc_str = str(desc_val) if desc_val is not None else None
+        combined_text = combine_text_for_embedding(payload.text, desc_str)
+        _log(f"[put_transcript] generating embedding for {len(combined_text)} chars")
+        embedding = embed_text(combined_text)
+        
         t = db.get(Transcript, video_id)
         if t is None:
-            t = Transcript(video_id=video_id, text=payload.text or "")
+            t = Transcript(video_id=video_id)
+            setattr(t, 'text', payload.text or "")
+            setattr(t, 'embedding', embedding)
             db.add(t)
-            _log("[put_transcript] creating new transcript row")
+            _log("[put_transcript] creating new transcript row with embedding")
         else:
-            t.text = payload.text or ""
-            _log("[put_transcript] updating transcript row")
+            setattr(t, 'text', payload.text or "")
+            setattr(t, 'embedding', embedding)
+            _log("[put_transcript] updating transcript row with new embedding")
 
         db.flush()
         db.commit()

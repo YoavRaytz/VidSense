@@ -77,15 +77,6 @@ export async function updateVideoTranscript(video_id: VideoId, text: string) {
   });
 }
 
-// RAG answer (legacy)
-export async function ragAnswer(query: string, k_ann = 50, k_final = 10) {
-  return jsonFetch(`${API_BASE}/rag/answer`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, k_ann, k_final }),
-  });
-}
-
 // =============================================================================
 // URL-first flow (new endpoints for Page 1)
 // =============================================================================
@@ -140,5 +131,58 @@ export async function putTranscript(videoId: VideoId, text: string) {
 export async function deleteVideo(videoId: VideoId) {
   return jsonFetch(`${API_BASE}/videos/${videoId}`, {
     method: 'DELETE',
+  });
+}
+
+// =============================================================================
+// Search and RAG endpoints
+// =============================================================================
+
+export interface SearchHit {
+  video_id: string;
+  title: string | null;
+  author: string | null;
+  url: string;
+  score: number;
+  snippet: string;
+  media_path: string | null;
+  source: string | null;
+  description: string | null;
+}
+
+export interface SearchResponse {
+  query: string;
+  hits: SearchHit[];
+  total: number;
+}
+
+export interface RAGSource {
+  video_id: string;
+  title: string | null;
+  author: string | null;
+  url: string;
+  snippet: string;
+  score: number;
+}
+
+export interface RAGResponse {
+  query: string;
+  answer: string;
+  sources: RAGSource[];
+}
+
+export async function searchVideos(query: string, k: number = 10, k_ann?: number) {
+  return jsonFetch<SearchResponse>(`${API_BASE}/search/query`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, k, k_ann }),
+  });
+}
+
+export async function ragAnswer(query: string, k_ann: number = 20, k_final: number = 5) {
+  return jsonFetch<RAGResponse>(`${API_BASE}/search/rag`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, k_ann, k_final }),
   });
 }

@@ -5,12 +5,14 @@ from .db import Base, engine, ensure_vector_indexes
 from . import models  # <-- important
 
 from .routes_ingest import router as ingest_router
+from .routes_search import router as search_router
 
 
 app = FastAPI()
 
 # Wire routers
 app.include_router(ingest_router)
+app.include_router(search_router)
 
 # Create tables & indexes on startup
 @app.on_event("startup")

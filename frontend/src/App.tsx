@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, NavLink } from "react-router-dom";
 import IngestPage from "./pages/IngestPage";
 import VideosPage from "./pages/VideosPage";
+import SearchPage from "./pages/SearchPage";
 
 export default function App() {
   return (
@@ -16,7 +17,7 @@ export default function App() {
         <Routes>
           <Route path="/ingest" element={<IngestPage/>} />
           <Route path="/videos" element={<VideosPage/>} />
-          <Route path="/search" element={<div className="card">Search – coming next</div>} />
+          <Route path="/search" element={<SearchPage/>} />
           <Route path="*" element={<IngestPage/>} />
         </Routes>
       </div>
