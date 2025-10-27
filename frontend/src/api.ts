@@ -136,3 +136,9 @@ export async function putTranscript(videoId: VideoId, text: string) {
     body: JSON.stringify({ text }),
   });
 }
+
+export async function deleteVideo(videoId: VideoId) {
+  return jsonFetch(`${API_BASE}/videos/${videoId}`, {
+    method: 'DELETE',
+  });
+}

@@ -45,7 +45,72 @@ class IngestURL(BaseModel):
     source: str | None = "web"
 
 
+class VideoOut(BaseModel):
+    id: str
+    source: str
+    url: str
+    title: str | None
+    author: str | None
+    description: str | None
+    clip_count: int
+    duration_sec: int | None
+    media_path: str | None
+    created_at: str | None
+
+    class Config:
+        from_attributes = True
+
+
 # ---------- routes ----------
+
+@router.get("/", response_model=list[VideoOut])
+def list_videos(db: Session = Depends(get_db)):
+    """Return all saved videos ordered by created_at desc"""
+    videos = db.query(Video).order_by(Video.created_at.desc()).all()
+    # Convert datetime to string for each video
+    result = []
+    for v in videos:
+        # Safely convert created_at
+        created_str = None
+        try:
+            if v.created_at:
+                created_str = v.created_at.isoformat()
+        except:
+            pass
+        
+        result.append({
+            'id': v.id,
+            'source': v.source,
+            'url': v.url,
+            'title': v.title,
+            'author': v.author,
+            'description': v.description,
+            'clip_count': v.clip_count,
+            'duration_sec': v.duration_sec,
+            'media_path': v.media_path,
+            'created_at': created_str
+        })
+    return result
+
+
+@router.delete("/{video_id}")
+def delete_video(video_id: str, db: Session = Depends(get_db)):
+    """Delete a video and its transcript"""
+    v = db.get(Video, video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+    
+    # Delete transcript if exists
+    t = db.get(Transcript, video_id)
+    if t:
+        db.delete(t)
+    
+    # Delete video
+    db.delete(v)
+    db.commit()
+    
+    return {"message": "Video deleted successfully", "video_id": video_id}
+
 
 @router.post("/ingest_url")
 def ingest_url(payload: IngestURL, db: Session = Depends(get_db)):
