@@ -89,23 +89,40 @@ export async function ragAnswer(query: string, k_ann = 50, k_final = 10) {
 // =============================================================================
 // URL-first flow (new endpoints for Page 1)
 // =============================================================================
+// frontend/src/api.ts
 export async function ingestUrl(link: string) {
-  return jsonFetch<{ video_id: VideoId }>(`${API_BASE}/videos/ingest_url`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ link }),
+  const r = await fetch(`/api/videos/ingest_url`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ link })
   });
+  if (!r.ok) throw new Error(`ingest_url failed: ${r.status}`);
+  return r.json() as Promise<{ video_id: string; clip_count?: number; description?: string }>;
 }
 
-export async function getStreamUrl(videoId: VideoId) {
-  return jsonFetch<{ url: string }>(`${API_BASE}/videos/${videoId}/stream`);
+// Video meta (caption + clip_count)
+export async function getVideoMeta(videoId: string) {
+  const res = await fetch(`/api/videos/${videoId}/meta`);
+  if (!res.ok) throw new Error(`meta failed: ${res.status}`);
+  return res.json() as Promise<{ clip_count: number; description?: string }>;
 }
 
-export async function generateTranscript(videoId: VideoId) {
-  return jsonFetch<TranscriptDTO>(`${API_BASE}/videos/${videoId}:generate_transcript`, {
-    method: 'POST',
-  });
+export async function getStreamUrl(videoId: string, clip?: number) {
+  const res = await fetch(`/api/videos/${videoId}/stream${clip ? `?clip=${clip}` : ''}`);
+  if (!res.ok) throw new Error(`stream failed: ${res.status}`);
+  return res.json() as Promise<{ url: string }>;
 }
+
+
+// Generate transcript for a specific clip
+export async function generateTranscript(videoId: string, clip?: number) {
+  const res = await fetch(`/api/videos/${videoId}:generate_transcript${clip ? `?clip=${clip}` : ''}`, { method: 'POST' });
+  if (!res.ok) {
+    const txt = await res.text().catch(()=> '');
+    throw new Error(`generate_transcript failed: ${res.status} ${txt}`);
+  }
+  return res.json() as Promise<{ video_id: string; text: string; title?: string; url: string; media_path?: string }>;
+}
+
 
 // NEW transcript CRUD (separate from legacy PUT /videos/{id})
 export async function getTranscript(videoId: VideoId) {

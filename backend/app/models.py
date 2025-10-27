@@ -9,6 +9,9 @@ class Video(Base):
     source = Column(String, nullable=False)
     url = Column(String, nullable=False)
     title = Column(String, nullable=True)
+    description = Column(Text, nullable=True)   # caption/description
+    clip_count = Column(Integer, nullable=False, default=1)
+
     author = Column(String, nullable=True)
     duration_sec = Column(Integer, nullable=True)
     lang = Column(String, default='en')
@@ -20,7 +23,7 @@ class Video(Base):
 class Transcript(Base):
     __tablename__ = 'transcripts'
     video_id = Column(String, primary_key=True)
-    text = Column(Text, nullable=False)
+    text = Column(Text, nullable=True)
     ocr_json = Column(JSONB, default=list)
     summary = Column(Text, nullable=True)
     embedding = Column(Vector(384))

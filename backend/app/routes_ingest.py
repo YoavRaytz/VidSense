@@ -6,7 +6,9 @@ import pprint
 from typing import Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+
+
 from pydantic import BaseModel
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -19,8 +21,11 @@ from .stream_utils import (
     remux_to_temp_mp4,
     safe_unlink,
     CommandError,
+    get_meta
 )
+
 from .transcribe.gemini_client import GeminiTranscriber
+import os, json, traceback  # <-- add traceback here
 
 
 router = APIRouter(prefix="/videos", tags=["videos"])
@@ -44,32 +49,55 @@ class IngestURL(BaseModel):
 
 @router.post("/ingest_url")
 def ingest_url(payload: IngestURL, db: Session = Depends(get_db)):
-    """
-    Register a video row. Since the 'videos.id' column doesn't autogenerate,
-    we assign a UUID ourselves.
-    """
-    _log(f"[ingest_url] link={payload.link} source={payload.source or 'web'}")
-
+    vid = uuid4().hex
+    v = Video(
+        id=vid,
+        source=payload.source or "web",
+        url=payload.link,
+        title=None,
+    )
+    db.add(v)
     try:
-        v = Video(
-            id=uuid4().hex,                 # <-- explicit PK (string)
-            source=payload.source or "web",
-            url=payload.link,
-            title=None,
-        )
-        db.add(v)
         db.flush()
+        # pull metadata (caption + clip count)
+        try:
+            meta = get_meta(payload.link)
+            v.description = meta.get("description") or None
+            v.clip_count = int(meta.get("clip_count") or 1)
+        except CommandError as e:
+            # non-fatal: still allow ingest
+            print(f"[ingest_url][meta warn] {e}")
         db.commit()
-        _log(f"[ingest_url] new video_id={v.id}")
-        return {"video_id": v.id}
-
     except SQLAlchemyError as e:
         db.rollback()
-        _log(f"[ingest_url][DB ERROR] {e.__class__.__name__}: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"DB error inserting video: {e.__class__.__name__}: {e}",
-        )
+        raise HTTPException(500, f"DB error: {e}")
+
+    return {"video_id": v.id, "clip_count": v.clip_count, "description": v.description}
+
+
+@router.get("/{video_id}/meta")
+def get_video_meta(video_id: str, db: Session = Depends(get_db)):
+    v = db.get(Video, video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+    return {"video_id": v.id, "description": v.description, "clip_count": v.clip_count}
+
+
+@router.get("/{video_id}/stream")
+def get_stream_url_route(
+    video_id: str,
+    clip: int | None = Query(default=None, ge=1),
+    db: Session = Depends(get_db)
+):
+    v = db.get(Video, video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+    try:
+        url = get_fresh_stream_url(v.url, clip_index=clip)
+    except CommandError as e:
+        raise HTTPException(502, f"Could not obtain stream URL: {e}")
+    return {"url": url}
+
 
 
 @router.get("/{video_id}/stream")
@@ -94,87 +122,76 @@ def get_stream_url(video_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{video_id}:generate_transcript", response_model=TranscriptOut)
-def generate_transcript(video_id: str, db: Session = Depends(get_db)):
-    """
-    Fetch fresh stream -> remux temp mp4 -> send to Gemini -> save transcript.
-    """
-    _log(f"[transcribe] video_id={video_id}")
-
+def generate_transcript(
+    video_id: str,
+    clip: int | None = Query(default=None, ge=1),
+    db: Session = Depends(get_db)
+):
     v = db.get(Video, video_id)
     if not v:
-        _log("[transcribe] 404 video not found")
         raise HTTPException(404, "Video not found")
 
-    temp_path: Optional[Path] = None
+    print(f"[transcribe] start video_id={video_id} clip={clip or 1}")
+
+    # ✅ Fail fast if key isn’t set (avoids generic 500)
+    if not os.getenv("GEMINI_API_KEY"):
+        print("[transcribe][FATAL] GEMINI_API_KEY not set")
+        raise HTTPException(500, "GEMINI_API_KEY not set")
+
+    temp = None
     try:
-        # 1) Fresh signed/short-lived stream URL
-        stream_url = get_fresh_stream_url(v.url)
-        _log(f"[transcribe] stream_url={stream_url[:140]}...")
+        stream_url = get_fresh_stream_url(v.url, clip_index=clip)
+        print(f"[transcribe] stream URL len={len(stream_url)}")
 
-        # 2) Remux to local MP4 (FFmpeg first; GST fallback handled inside)
-        temp_path = remux_to_temp_mp4(stream_url)
-        _log(f"[transcribe] remux done -> {temp_path} ({temp_path.stat().st_size} bytes)")
+        temp = remux_to_temp_mp4(stream_url)
+        size = os.path.getsize(temp)
+        print(f"[transcribe] remux ok: path={temp} size={size} bytes")
+        if size < 2048:
+            safe_unlink(temp)
+            raise HTTPException(502, "Remux produced too small file (<2KB)")
 
-        # 3) Transcribe with Gemini
         transcriber = GeminiTranscriber()
-        result = transcriber.transcribe(str(temp_path))
-        # _log(f"[transcribe] gemini result: {result}")
-        pprint.pprint(f"[transcribe] gemini result: {result}")
-        _log(f"[transcribe] gemini ok; keys={list(result.keys())}")
+        print("[transcribe] calling Gemini…")
+        result = transcriber.transcribe(str(temp))
+        print(f"[transcribe] gemini ok; keys={list(result.keys())}")
 
+    except HTTPException:
+        raise
     except CommandError as e:
-        _log(f"[transcribe][FETCH/REMUX ERROR] {e}")
+        traceback.print_exc()
         raise HTTPException(502, f"Fetch/remux error: {e}")
     except Exception as e:
-        # any other unexpected error from Gemini / parsing
-        _log(f"[transcribe][ERROR] {e.__class__.__name__}: {e}")
+        traceback.print_exc()
         raise HTTPException(502, f"Transcription error: {e}")
     finally:
-        if temp_path is not None:
-            safe_unlink(temp_path)
-            _log("[transcribe] temp file cleaned")
+        if temp:
+            safe_unlink(temp)
+            print("[transcribe] temp file cleaned")
 
-    import json
-
-    if isinstance(result, dict):
-        text = json.dumps(result, ensure_ascii=False)  # <- stringify dict
-    else:
-        text = str(result)
-
-    if not text.strip():
-        raise HTTPException(502, "Empty transcript returned")
-
+    # store text (append per-clip)
+    text = (result.get("transcript") or "").strip()
     if not text:
-        _log("[transcribe] ERROR: empty transcript returned")
-        raise HTTPException(502, "Empty transcript returned")
-
-    # 4) Upsert into transcripts
-    try:
-        t = db.get(Transcript, video_id)
-        if t is None:
-            t = Transcript(video_id=video_id, text=text)
-            db.add(t)
-            _log("[transcribe] creating new transcript row")
+        raw = result.get("raw")
+        if isinstance(raw, (dict, list)):
+            text = json.dumps(raw, ensure_ascii=False)
+        elif isinstance(raw, str):
+            text = raw
         else:
-            t.text = text
-            _log("[transcribe] updating existing transcript row")
+            text = json.dumps(result, ensure_ascii=False)
 
-        db.flush()
-        db.commit()
-        _log(f"[transcribe] saved transcript video_id={video_id}, chars={len(text)}")
+    clip_label = f"[Clip {clip or 1}]"
+    header = f"\n\n--- {clip_label} ---\n"
 
-    except SQLAlchemyError as e:
-        db.rollback()
-        _log(f"[transcribe][DB ERROR] {e.__class__.__name__}: {e}")
-        raise HTTPException(500, f"DB error saving transcript: {e.__class__.__name__}: {e}")
+    t = db.get(Transcript, video_id)
+    if t:
+        t.text = (t.text or "") + header + text
+    else:
+        t = Transcript(video_id=video_id, text=(header + text).lstrip())
+        db.add(t)
+    db.commit()
 
-    return TranscriptOut(
-        video_id=video_id,
-        title=v.title,
-        url=v.url,
-        media_path=v.media_path,
-        text=t.text,
-    )
+    return TranscriptOut(video_id=video_id, title=v.title, url=v.url, media_path=v.media_path, text=t.text)
+
 
 
 @router.get("/{video_id}/transcript", response_model=TranscriptOut)

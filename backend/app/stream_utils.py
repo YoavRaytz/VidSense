@@ -1,6 +1,8 @@
 # backend/app/stream_utils.py
 import os, shlex, subprocess, uuid
 from pathlib import Path
+from typing import Any, Dict, Optional, Tuple  # <-- Add this line
+import json
 
 YTDLP_BIN = os.getenv("YTDLP_BIN", "yt-dlp")
 YTDLP_COOKIES = os.getenv("YTDLP_COOKIES")
@@ -72,32 +74,46 @@ def remux_to_temp_mp4(stream_url: str, timeout: int = 300) -> Path:
 
 
 
-def get_fresh_stream_url(link: str, timeout: int = 20) -> str:
-    """Return a short-lived direct MP4 URL using yt-dlp without downloading."""
-    # Prefer a cookies file if provided; else allow chrome:Default style
-    cookies_arg = []
-    if YTDLP_COOKIES:
-        cookies_arg = ["--cookies", YTDLP_COOKIES] if YTDLP_COOKIES.endswith(".txt") else ["--cookies-from-browser", YTDLP_COOKIES]
+def _cookies_args() -> list[str]:
+    if not YTDLP_COOKIES:
+        return []
+    return ["--cookies", YTDLP_COOKIES] if YTDLP_COOKIES.endswith(".txt") else ["--cookies-from-browser", YTDLP_COOKIES]
 
-    cmd = [
-        YTDLP_BIN,
-        *cookies_arg,
-        "-f",
-        "best[ext=mp4][acodec!=none][vcodec!=none]/best",
-        "-g",
-        link,
-    ]
+def get_meta(link: str, timeout: int = 25) -> Dict[str, Any]:
+    """Return yt-dlp JSON for a link. Works for single or multi-video posts."""
+    cmd = [YTDLP_BIN, *_cookies_args(), "-J", link]
     try:
         out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=timeout, text=True)
     except subprocess.CalledProcessError as e:
-        raise CommandError(f"yt-dlp failed: {e.output[-400:]}" )
-    except subprocess.TimeoutExpired:
-        raise CommandError("yt-dlp timed out")
+        raise CommandError(f"yt-dlp -J failed: {e.output[-500:]}")
+    data = json.loads(out)
+    # normalize: count clips and caption/description
+    if "entries" in data and isinstance(data["entries"], list):
+        clip_count = sum(1 for e in data["entries"] if e and (e.get("url") or e.get("formats")))
+    else:
+        clip_count = 1
+    description = (data.get("description") or data.get("fulltitle") or "").strip()
+    return {"raw": data, "clip_count": max(1, clip_count), "description": description}
 
-    url = out.strip().splitlines()[0] if out.strip() else ""
+def get_fresh_stream_url(link: str, clip_index: Optional[int] = None, timeout: int = 20) -> str:
+    """
+    Return a short-lived direct MP4 URL. If clip_index is provided (1-based),
+    use --playlist-items to target that clip in a sidecar.
+    """
+    cookies_arg = _cookies_args()
+    base = [YTDLP_BIN, *cookies_arg, "-f", "best[ext=mp4][acodec!=none][vcodec!=none]/best"]
+    if clip_index:
+        base += ["--playlist-items", str(clip_index)]
+    cmd = [*base, "-g", link]
+    try:
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=timeout, text=True)
+    except subprocess.CalledProcessError as e:
+        raise CommandError(f"yt-dlp failed: {e.output[-500:]}")
+    url = (out or "").strip().splitlines()[0] if out else ""
     if not url:
         raise CommandError("No URL returned by yt-dlp")
     return url
+
 
 
 def safe_unlink(p: Path) -> None:
