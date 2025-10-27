@@ -179,8 +179,11 @@ def generate_transcript(
         else:
             text = json.dumps(result, ensure_ascii=False)
 
-    clip_label = f"[Clip {clip or 1}]"
-    header = f"\n\n--- {clip_label} ---\n"
+    # Only add clip header if there are multiple clips
+    header = ""
+    if v.clip_count > 1:
+        clip_label = f"[Clip {clip or 1}]"
+        header = f"\n\n--- {clip_label} ---\n"
 
     t = db.get(Transcript, video_id)
     if t:

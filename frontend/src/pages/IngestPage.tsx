@@ -20,6 +20,9 @@ export default function IngestPage(){
 
   // pretty view state
   const [pretty, setPretty] = useState(true);
+  const [showCaption, setShowCaption] = useState(true);
+  const [textSize, setTextSize] = useState(16); // adjustable text size
+  const [displayHeight, setDisplayHeight] = useState(650); // adjustable height
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
@@ -66,7 +69,7 @@ export default function IngestPage(){
     try{
       await generateTranscript(videoId, clip);
       await reloadTranscript(videoId);
-      setStatusMsg(`✅ Transcribed clip ${clip}`);
+      setStatusMsg(clipCount > 1 ? `✅ Transcribed clip ${clip}` : '✅ Transcribed');
     } catch (e: any) {
       setStatusMsg(`❌ Error: ${e?.message || e}`);
     } finally { setLoading(null); }
@@ -85,7 +88,7 @@ export default function IngestPage(){
         await generateTranscript(videoId, i);    // append transcript for this clip
         await reloadTranscript(videoId);         // reflect appended text
       }
-      setStatusMsg(`✅ Done. Processed ${clipCount} clip(s).`);
+      setStatusMsg(`✅ Done. Processed ${clipCount} clips.`);
     } catch (e: any) {
       setStatusMsg(`❌ Error on clip ${batchIdx}: ${e?.message || e}`);
     } finally {
@@ -145,18 +148,18 @@ export default function IngestPage(){
 
         {streamUrl ? (
           <>
-            {clipCount > 1 && (
-              <div className="row" style={{ marginBottom: 10, alignItems: 'center', gap: 8 }}>
-                <button className="btn" onClick={()=> setClip(c => Math.max(1, c-1))} disabled={clip<=1 || disableActions}>« Prev</button>
-                <div className="muted">Clip {clip} / {clipCount}</div>
-                <button className="btn" onClick={()=> setClip(c => Math.min(clipCount, c+1))} disabled={clip>=clipCount || disableActions}>Next »</button>
-              </div>
-            )}
-            <video ref={videoRef} src={streamUrl} controls className="video" />
-            <div className="spacer" />
-            <div className="row" style={{ gap: 8 }}>
-              <button className="btn" onClick={handleGenerate} disabled={disableActions}>
-                {loading==='transcribing'? 'Transcribing…' : `Get Transcript (clip ${clip})`}
+            {/* Action buttons above video */}
+            <div className="row" style={{ marginBottom: 10, gap: 8, flexWrap: 'wrap' }}>
+              {clipCount > 1 && (
+                <>
+                  <button className="btn" onClick={()=> setClip(c => Math.max(1, c-1))} disabled={clip<=1 || disableActions}>« Prev</button>
+                  <div className="muted">Clip {clip} / {clipCount}</div>
+                  <button className="btn" onClick={()=> setClip(c => Math.min(clipCount, c+1))} disabled={clip>=clipCount || disableActions}>Next »</button>
+                  <div style={{ width: '100%', height: 0 }} />
+                </>
+              )}
+              <button className="btn btn-primary" onClick={handleGenerate} disabled={disableActions}>
+                {loading==='transcribing'? 'Transcribing…' : (clipCount > 1 ? `Get Transcript (clip ${clip})` : 'Get Transcript')}
               </button>
               {clipCount > 1 && (
                 <button className="btn btn-primary" onClick={handleProcessAll} disabled={isBatch}>
@@ -164,43 +167,81 @@ export default function IngestPage(){
                 </button>
               )}
             </div>
-            {statusMsg && (
-              <div className="alert" style={{ marginTop: 8 }}>
-                {statusMsg}
-              </div>
-            )}
+            <video ref={videoRef} src={streamUrl} controls className="video" />
           </>
         ) : (
           <p className="muted" style={{margin: 0}}>Paste a URL and click <b>Open</b> to preview.</p>
-        )}
-
-        {description && (
-          <div className="card" style={{ marginTop: 12 }}>
-            <div className="section-title" style={{ marginBottom: 6 }}>Caption</div>
-            <pre style={captionStyle}>{description}</pre>
-          </div>
         )}
       </div>
 
       {/* Right: transcript viewer/editor (with pretty/JSON view) */}
       <div className="card">
-        <div className="row" style={{ alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+        {/* Caption section - above transcript */}
+        {description && (
+          <div style={{ marginBottom: 16 }}>
+            <div className="row" style={{ alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <h3 className="section-title" style={{ margin: 0 }}>Caption</h3>
+              <label className="text-xs text-gray-600" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input type="checkbox" checked={showCaption} onChange={e => setShowCaption(e.target.checked)} />
+                Show caption
+              </label>
+            </div>
+            {showCaption && (
+              <div style={{ background: '#0b1220', border: '1px solid #1f2937', borderRadius: 8, padding: 12 }}>
+                <pre style={captionStyle}>{description}</pre>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="row" style={{ alignItems: 'center', justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
           <h3 className="section-title" style={{ margin: 0 }}>Transcript</h3>
-          <label className="text-xs text-gray-600" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <input type="checkbox" checked={pretty} onChange={e => setPretty(e.target.checked)} />
-            Pretty view
-          </label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <label className="text-xs text-gray-600" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input type="checkbox" checked={pretty} onChange={e => setPretty(e.target.checked)} />
+              Pretty view
+            </label>
+            <label className="text-xs text-gray-600" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              Size: {textSize}px
+              <input 
+                type="range" 
+                min="12" 
+                max="24" 
+                value={textSize} 
+                onChange={e => setTextSize(Number(e.target.value))}
+                style={{ width: 80 }}
+              />
+            </label>
+            <label className="text-xs text-gray-600" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              Height: {displayHeight}px
+              <input 
+                type="range" 
+                min="400" 
+                max="1200" 
+                step="50"
+                value={displayHeight} 
+                onChange={e => setDisplayHeight(Number(e.target.value))}
+                style={{ width: 100 }}
+              />
+            </label>
+          </div>
         </div>
 
+        {statusMsg && (
+          <div className="alert" style={{ marginBottom: 12 }}>
+            {statusMsg}
+          </div>
+        )}
+
         {pretty && parsed ? (
-          <div style={prettyWrap}>
-            <Section title="Main Topic & Category" body={parsed.topic_category} />
+          <div style={{...prettyWrap, fontSize: textSize, lineHeight: 1.8, minHeight: displayHeight}}>
+            <Section title="Main Topic & Category" body={parsed.topic_category} textSize={textSize} />
             <Divider />
-            <Section title="Onscreen Text" body={parsed.ocr} />
+            <Section title="Onscreen Text" body={parsed.ocr} textSize={textSize} />
             <Divider />
-            <Section title="Full Transcript"><pre style={preStyle}>{parsed.transcript || '—'}</pre></Section>
+            <Section title="Full Transcript" textSize={textSize}><pre style={{...preStyle, fontSize: textSize}}>{parsed.transcript || '—'}</pre></Section>
             <Divider />
-            <Section title="Summary" body={parsed.summary} />
+            <Section title="Summary" body={parsed.summary} textSize={textSize} />
             <div style={{ padding: 12, color: '#9ca3af', fontSize: 12 }}>
               {new Intl.NumberFormat().format((parsed.transcript || '').length)} characters
             </div>
@@ -211,7 +252,7 @@ export default function IngestPage(){
             placeholder="Transcript will appear here…"
             value={transcript}
             onChange={e=>setTranscript(e.target.value)}
-            style={taStyle}
+            style={{...taStyle, fontSize: textSize, minHeight: displayHeight}}
             disabled={isBatch}
           />
         )}
@@ -228,14 +269,14 @@ export default function IngestPage(){
 }
 
 /* ---- small helpers / styles ---- */
-const prettyWrap: React.CSSProperties = { border: '1px solid #1f2937', background: '#0b1220', borderRadius: 8, overflow: 'hidden' };
-const preStyle: React.CSSProperties = { margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace', fontSize: 14, lineHeight: 1.55, color: '#e5e7eb' };
-const bodyStyle: React.CSSProperties = { whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: '#e5e7eb', fontSize: 14, lineHeight: 1.55, margin: 0 };
+const prettyWrap: React.CSSProperties = { border: '1px solid #1f2937', background: '#0b1220', borderRadius: 8, overflow: 'hidden', minHeight: 650 };
+const preStyle: React.CSSProperties = { margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace', lineHeight: 1.8, color: '#e5e7eb' };
+const bodyStyle: React.CSSProperties = { whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: '#e5e7eb', lineHeight: 1.8, margin: 0 };
 const headerStyle: React.CSSProperties = { color: '#93c5fd', fontWeight: 700, fontSize: 13, letterSpacing: 0.2, padding: '10px 12px 0', textTransform: 'uppercase' };
-const sectionWrap: React.CSSProperties = { padding: '6px 12px 10px' };
-function Section({ title, body, children }: { title: string; body?: string | null; children?: React.ReactNode; }) {
-  return (<div><div style={headerStyle}>{title}</div><div style={sectionWrap}>{children ? children : <p style={bodyStyle}>{(body || '').toString().trim() || '—'}</p>}</div></div>);
+const sectionWrap: React.CSSProperties = { padding: '8px 16px 12px' };
+function Section({ title, body, children, textSize = 16 }: { title: string; body?: string | null; children?: React.ReactNode; textSize?: number; }) {
+  return (<div><div style={headerStyle}>{title}</div><div style={sectionWrap}>{children ? children : <p style={{...bodyStyle, fontSize: textSize}}>{(body || '').toString().trim() || '—'}</p>}</div></div>);
 }
 function Divider(){ return <div style={{ height: 1, background: '#1f2937' }} />; }
-const taStyle: React.CSSProperties = { minHeight: 360, padding: 12, fontFamily:'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace', fontSize: 14, lineHeight: 1.55, background: '#0b1220', color: '#e5e7eb', borderColor: '#1f2937', resize: 'vertical' };
+const taStyle: React.CSSProperties = { minHeight: 650, padding: 20, fontFamily:'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace', lineHeight: 1.8, background: '#0b1220', color: '#e5e7eb', borderColor: '#1f2937', resize: 'vertical' };
 const captionStyle: React.CSSProperties = { margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 13, lineHeight: 1.5 };
