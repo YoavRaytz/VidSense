@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from .db import get_db
 from .embeddings import embed_text, combine_text_for_embedding
+from .reranker import rerank
 from .models import Video, Transcript
 from .transcribe.gemini_client import GeminiTranscriber
 
@@ -26,8 +27,8 @@ router = APIRouter(prefix="/search", tags=["search"])
 
 class SearchRequest(BaseModel):
     query: str = Field(..., description="Search query text")
-    k: int = Field(default=10, ge=1, le=100, description="Number of results to return")
-    k_ann: int | None = Field(default=None, ge=1, description="Number of candidates for ANN search (reranking)")
+    k: int = Field(default=10, ge=1, le=100, description="Number of final results to return")
+    k_ann: int = Field(default=50, ge=1, le=200, description="Number of candidates for ANN search (before reranking)")
 
 
 class SearchHit(BaseModel):
@@ -74,31 +75,31 @@ class RAGResponse(BaseModel):
 @router.post("/query", response_model=SearchResponse)
 def search_videos(payload: SearchRequest, db: Session = Depends(get_db)):
     """
-    Semantic search over video transcripts using vector similarity.
+    Two-stage semantic search: ANN retrieval → Cross-encoder reranking
     
     Process:
-    1. Embed the query
-    2. Perform cosine similarity search against transcripts.embedding
-    3. Optionally rerank top-k_ann results
-    4. Return top-k final results with snippets
+    1. Stage 1 (ANN): Embed query and retrieve k_ann candidates using pgvector
+    2. Stage 2 (Rerank): Use cross-encoder to precisely rerank candidates
+    3. Return top-k final results with snippets
     """
-    print(f"[search] query='{payload.query}' k={payload.k}")
+    print(f"[search] ========== NEW SEARCH ==========")
+    print(f"[search] Query: '{payload.query}'")
+    print(f"[search] k_ann={payload.k_ann}, k_final={payload.k}")
     
     if not payload.query.strip():
         return SearchResponse(query=payload.query, hits=[], total=0)
     
-    # Generate query embedding
+    # Stage 1: Generate query embedding
     try:
+        print(f"[search] Stage 1: Generating query embedding...")
         query_embedding = embed_text(payload.query)
+        print(f"[search] Embedding generated successfully")
     except Exception as e:
-        print(f"[search][ERROR] embedding failed: {e}")
+        print(f"[search][ERROR] Embedding failed: {e}")
         raise HTTPException(500, f"Failed to generate query embedding: {e}")
     
-    # Determine how many candidates to retrieve
-    k_retrieve = payload.k_ann or payload.k
-    
-    # Perform vector similarity search using pgvector
-    # Note: <=> is cosine distance operator (lower is better), so we negate for similarity score
+    # Stage 1: ANN search using pgvector (retrieve k_ann candidates)
+    print(f"[search] Stage 1: Performing ANN search for {payload.k_ann} candidates...")
     sql = sql_text("""
         SELECT 
             t.video_id,
@@ -109,6 +110,7 @@ def search_videos(payload: SearchRequest, db: Session = Depends(get_db)):
             v.description,
             v.media_path,
             t.text,
+            (t.embedding <=> :query_vec) AS ann_distance,
             1 - (t.embedding <=> :query_vec) AS similarity_score
         FROM transcripts t
         JOIN videos v ON t.video_id = v.id
@@ -118,48 +120,106 @@ def search_videos(payload: SearchRequest, db: Session = Depends(get_db)):
     """)
     
     try:
+        # Optional: Set HNSW search parameter for better recall
+        try:
+            db.execute(sql_text("SET hnsw.ef_search = 80"))
+        except:
+            pass  # Ignore if HNSW not configured
+        
         result = db.execute(
             sql,
-            {"query_vec": json.dumps(query_embedding), "limit": k_retrieve}
+            {"query_vec": json.dumps(query_embedding), "limit": payload.k_ann}
         ).fetchall()
     except Exception as e:
-        print(f"[search][ERROR] database query failed: {e}")
+        print(f"[search][ERROR] Database query failed: {e}")
         raise HTTPException(500, f"Database search failed: {e}")
     
-    print(f"[search] found {len(result)} candidates")
+    print(f"[search] Stage 1: Retrieved {len(result)} candidates from ANN search")
     
-    # Convert to hits with snippets
-    hits = []
+    if not result:
+        print(f"[search] No results found")
+        return SearchResponse(query=payload.query, hits=[], total=0)
+    
+    # Convert to documents for reranking
+    docs = []
     for row in result:
-        video_id, title, author, url, source, description, media_path, text, score = row
+        video_id, title, author, url, source, description, media_path, text, ann_dist, sim_score = row
         
-        # Generate snippet (extract relevant portion around query terms)
-        snippet = _generate_snippet(text or "", payload.query, max_length=200)
+        # Combine title, description, and transcript for better reranking
+        combined_text = ""
+        if title:
+            combined_text += f"Title: {title}\n\n"
+        if description:
+            combined_text += f"Description: {description}\n\n"
+        if text:
+            combined_text += f"Transcript: {text}"
+        
+        docs.append({
+            "video_id": video_id,
+            "title": title,
+            "author": author,
+            "url": url,
+            "source": source,
+            "description": description,
+            "media_path": media_path,
+            "text": combined_text,  # Use combined text for reranking
+            "transcript_only": text or "",  # Keep original transcript for snippets
+            "ann_distance": float(ann_dist),
+            "vector_similarity": float(sim_score)
+        })
+    
+    # Stage 2: Cross-Encoder Reranking
+    print(f"[search] Stage 2: Cross-encoder reranking...")
+    ranked_docs = rerank(payload.query, docs, text_key="text")
+    print(f"[search] Stage 2: Reranking complete")
+    
+    # Apply softmax to scores for better distribution
+    if ranked_docs:
+        import math
+        raw_scores = [d.get("rerank_score", 0.0) for d in ranked_docs]
+        
+        print(f"[search] Applying softmax to scores: raw range [{min(raw_scores):.4f}, {max(raw_scores):.4f}]")
+        
+        # Softmax: exp(score) / sum(exp(all_scores))
+        exp_scores = [math.exp(s) for s in raw_scores]
+        sum_exp = sum(exp_scores)
+        
+        for doc, exp_score in zip(ranked_docs, exp_scores):
+            raw_score = doc.get("rerank_score", 0.0)
+            softmax_score = exp_score / sum_exp
+            doc["rerank_score"] = softmax_score
+            print(f"[search]   video_id={doc['video_id'][:16]}: raw={raw_score:.4f} -> softmax={softmax_score:.4f} ({softmax_score*100:.1f}%)")
+    
+    # Convert to SearchHit objects and take top-k
+    hits = []
+    for i, doc in enumerate(ranked_docs[:payload.k], 1):
+        # Use transcript_only for snippet generation (not the combined text)
+        snippet = _generate_snippet(doc.get("transcript_only", ""), payload.query, max_length=200)
+        rerank_score = doc.get("rerank_score", 0.0)
+        
+        title = doc.get('title') or 'Untitled'
+        title_display = title[:40] if len(title) > 40 else title
+        
+        print(f"[search] Result #{i}: video_id={doc['video_id'][:16]}..., rerank_score={rerank_score:.4f}, title={title_display}")
         
         hits.append(SearchHit(
-            video_id=video_id,
-            title=title,
-            author=author,
-            url=url,
-            source=source,
-            description=description,
-            media_path=media_path,
-            score=float(score),
+            video_id=doc["video_id"],
+            title=doc["title"],
+            author=doc["author"],
+            url=doc["url"],
+            source=doc["source"],
+            description=doc["description"],
+            media_path=doc["media_path"],
+            score=rerank_score,  # Use rerank score as the final score
             snippet=snippet
         ))
     
-    # Optional: Rerank if k_ann was specified
-    if payload.k_ann and payload.k_ann > payload.k:
-        print(f"[search] reranking from {len(hits)} to {payload.k}")
-        hits = _rerank_results(payload.query, hits)
+    print(f"[search] Returning {len(hits)} final results")
+    print(f"[search] ========== SEARCH COMPLETE ==========\n")
     
-    # Return top-k
-    final_hits = hits[:payload.k]
-    
-    print(f"[search] returning {len(final_hits)} results")
     return SearchResponse(
         query=payload.query,
-        hits=final_hits,
+        hits=hits,
         total=len(result)
     )
 
@@ -172,36 +232,44 @@ def rag_answer(payload: RAGRequest, db: Session = Depends(get_db)):
     Retrieval-Augmented Generation: Answer questions using video transcripts.
     
     Process:
-    1. Search for relevant videos (k_ann candidates)
-    2. Rerank and select top k_final sources
+    1. Stage 1+2: Retrieve k_ann candidates and rerank with cross-encoder
+    2. Select top k_final sources
     3. Build context with source citations
     4. Generate answer using Gemini with citations [1], [2], etc.
     5. Return answer + sources
     """
-    print(f"[rag] query='{payload.query}' k_ann={payload.k_ann} k_final={payload.k_final}")
+    print(f"[rag] ========== NEW RAG REQUEST ==========")
+    print(f"[rag] Query: '{payload.query}'")
+    print(f"[rag] k_ann={payload.k_ann}, k_final={payload.k_final}")
     
     if not payload.query.strip():
         raise HTTPException(400, "Query cannot be empty")
     
-    # Step 1: Retrieve candidates using vector search
-    search_req = SearchRequest(query=payload.query, k=payload.k_ann, k_ann=None)
+    # Step 1+2: Retrieve and rerank using search endpoint
+    search_req = SearchRequest(query=payload.query, k=payload.k_final, k_ann=payload.k_ann)
     search_result = search_videos(search_req, db)
     
     if not search_result.hits:
+        print(f"[rag] No results found")
         return RAGResponse(
             query=payload.query,
             answer="I couldn't find any relevant information in the video database to answer your question.",
             sources=[]
         )
     
-    # Step 2: Take top k_final for RAG
-    top_hits = search_result.hits[:payload.k_final]
+    # Step 2: Use the reranked results (already top k_final)
+    top_hits = search_result.hits
+    print(f"[rag] Using {len(top_hits)} sources for answer generation")
     
     # Step 3: Build context with numbered sources
     context_parts = []
     sources = []
     
     for idx, hit in enumerate(top_hits, 1):
+        title = hit.title or 'Untitled'
+        title_display = title[:40] if len(title) > 40 else title
+        print(f"[rag] Source [{idx}]: video_id={hit.video_id[:16]}..., score={hit.score:.4f}, title={title_display}")
+        
         # Get full transcript
         transcript_obj = db.get(Transcript, hit.video_id)
         transcript_text: str = hit.snippet  # default
@@ -211,8 +279,10 @@ def rag_answer(payload: RAGRequest, db: Session = Depends(get_db)):
                 transcript_text = str(text_val)
         
         # Truncate very long transcripts
+        original_len = len(transcript_text)
         if len(transcript_text) > 3000:
             transcript_text = transcript_text[:3000] + "..."
+            print(f"[rag]   Truncated transcript from {original_len} to 3000 chars")
         
         context_parts.append(f"[Source {idx}] {hit.title or 'Untitled'}\n{transcript_text}\n")
         
@@ -226,8 +296,10 @@ def rag_answer(payload: RAGRequest, db: Session = Depends(get_db)):
         ))
     
     context = "\n\n".join(context_parts)
+    print(f"[rag] Built context with {len(context)} characters from {len(sources)} sources")
     
     # Step 4: Generate answer with Gemini
+    print(f"[rag] Generating answer with Gemini...")
     prompt = f"""You are a helpful assistant that answers questions based on video transcripts.
 
 Question: {payload.query}
@@ -254,17 +326,21 @@ Answer:"""
         client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
         
         response = client.models.generate_content(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-flash",
             contents=prompt
         )
         
         answer = getattr(response, "text", None) or "Failed to generate answer."
+        print(f"[rag] Answer generated successfully ({len(answer)} chars)")
         
     except Exception as e:
-        print(f"[rag][ERROR] generation failed: {e}")
+        print(f"[rag][ERROR] Generation failed: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(500, f"Failed to generate answer: {e}")
     
-    print(f"[rag] generated answer with {len(sources)} sources")
+    print(f"[rag] Returning answer with {len(sources)} sources")
+    print(f"[rag] ========== RAG COMPLETE ==========\n")
     
     return RAGResponse(
         query=payload.query,

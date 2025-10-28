@@ -2,6 +2,7 @@ import { useState, useRef } from 'react';
 import { searchVideos, ragAnswer, getStreamUrl, getTranscript, getVideoMeta, type SearchHit, type RAGResponse } from '../api';
 import VideoPlayer from '../components/VideoPlayer';
 import TranscriptViewer from '../components/TranscriptViewer';
+import ReactMarkdown from 'react-markdown';
 
 interface VideoDetail extends SearchHit {
   clip_count: number;
@@ -137,36 +138,92 @@ export default function SearchPage() {
   }
 
   function renderAnswerWithCitations(answer: string) {
-    // Find and make citations clickable
-    const parts = answer.split(/(\[\d+\])/g);
-    
-    return (
-      <p style={{ lineHeight: 1.8, margin: 0 }}>
-        {parts.map((part, idx) => {
-          const match = part.match(/\[(\d+)\]/);
-          if (match) {
-            const num = parseInt(match[1]);
-            return (
-              <span
-                key={idx}
-                onClick={() => handleCitationClick(num)}
-                style={{
-                  color: '#3b82f6',
-                  cursor: 'pointer',
-                  fontWeight: 600,
-                  textDecoration: 'underline',
-                  padding: '0 2px',
-                }}
-                onMouseEnter={(e) => (e.currentTarget.style.color = '#2563eb')}
-                onMouseLeave={(e) => (e.currentTarget.style.color = '#3b82f6')}
-              >
-                {part}
-              </span>
-            );
+    // Helper function to process text and replace citation placeholders with clickable elements
+    const processTextWithCitations = (text: any): any => {
+      if (typeof text !== 'string') {
+        return text;
+      }
+      
+      // Split by citation pattern [1], [2], etc.
+      const parts = text.split(/(\[\d+\])/g);
+      return parts.map((part, idx) => {
+        const match = part.match(/\[(\d+)\]/);
+        if (match) {
+          const citationNum = parseInt(match[1]);
+          return (
+            <span
+              key={idx}
+              onClick={() => handleCitationClick(citationNum)}
+              style={{
+                color: '#3b82f6',
+                cursor: 'pointer',
+                fontWeight: 600,
+                textDecoration: 'underline',
+                padding: '0 2px',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.color = '#2563eb')}
+              onMouseLeave={(e) => (e.currentTarget.style.color = '#3b82f6')}
+            >
+              {part}
+            </span>
+          );
+        }
+        return part;
+      });
+    };
+
+    // Helper to recursively process children
+    const processChildren = (children: any): any => {
+      if (typeof children === 'string') {
+        return processTextWithCitations(children);
+      }
+      if (Array.isArray(children)) {
+        return children.map((child, idx) => {
+          if (typeof child === 'string') {
+            return <span key={idx}>{processTextWithCitations(child)}</span>;
           }
-          return <span key={idx}>{part}</span>;
-        })}
-      </p>
+          return child;
+        });
+      }
+      return children;
+    };
+
+    return (
+      <div style={{ lineHeight: 1.8 }}>
+        <ReactMarkdown
+          components={{
+            // Process all text elements to handle citations
+            p: ({ children, ...props }) => (
+              <p {...props}>{processChildren(children)}</p>
+            ),
+            strong: ({ children, ...props }) => (
+              <strong {...props} style={{ color: '#f59e0b', fontWeight: 700 }}>
+                {processChildren(children)}
+              </strong>
+            ),
+            em: ({ children, ...props }) => (
+              <em {...props}>{processChildren(children)}</em>
+            ),
+            li: ({ children, ...props }) => (
+              <li {...props} style={{ marginBottom: '0.25rem' }}>
+                {processChildren(children)}
+              </li>
+            ),
+            ul: ({ children, ...props }) => (
+              <ul {...props} style={{ marginLeft: '1.5rem', marginTop: '0.5rem', marginBottom: '0.5rem' }}>
+                {children}
+              </ul>
+            ),
+            ol: ({ children, ...props }) => (
+              <ol {...props} style={{ marginLeft: '1.5rem', marginTop: '0.5rem', marginBottom: '0.5rem' }}>
+                {children}
+              </ol>
+            ),
+          }}
+        >
+          {answer}
+        </ReactMarkdown>
+      </div>
     );
   }
 
