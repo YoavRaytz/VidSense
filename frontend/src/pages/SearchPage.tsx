@@ -138,84 +138,86 @@ export default function SearchPage() {
   }
 
   function renderAnswerWithCitations(answer: string) {
-    // Helper function to process text and replace citation placeholders with clickable elements
-    const processTextWithCitations = (text: any): any => {
-      if (typeof text !== 'string') {
-        return text;
-      }
-      
-      // Split by citation pattern [1], [2], etc.
-      const parts = text.split(/(\[\d+\])/g);
-      return parts.map((part, idx) => {
-        const match = part.match(/\[(\d+)\]/);
-        if (match) {
-          const citationNum = parseInt(match[1]);
-          return (
-            <span
-              key={idx}
-              onClick={() => handleCitationClick(citationNum)}
-              style={{
-                color: '#3b82f6',
-                cursor: 'pointer',
-                fontWeight: 600,
-                textDecoration: 'underline',
-                padding: '0 2px',
-              }}
-              onMouseEnter={(e) => (e.currentTarget.style.color = '#2563eb')}
-              onMouseLeave={(e) => (e.currentTarget.style.color = '#3b82f6')}
-            >
-              {part}
-            </span>
-          );
-        }
-        return part;
-      });
-    };
-
-    // Helper to recursively process children
-    const processChildren = (children: any): any => {
-      if (typeof children === 'string') {
-        return processTextWithCitations(children);
-      }
-      if (Array.isArray(children)) {
-        return children.map((child, idx) => {
-          if (typeof child === 'string') {
-            return <span key={idx}>{processTextWithCitations(child)}</span>;
+    // Function to recursively process children and make citations clickable
+    const makeInteractive = (node: any): any => {
+      if (typeof node === 'string') {
+        // Split text by citation pattern and make clickable
+        const parts = node.split(/(\[\d+\])/g);
+        return parts.map((part: string, idx: number) => {
+          const match = part.match(/\[(\d+)\]/);
+          if (match) {
+            const citationNum = parseInt(match[1]);
+            return (
+              <span
+                key={`cite-${idx}`}
+                onClick={() => handleCitationClick(citationNum)}
+                style={{
+                  color: '#60a5fa',
+                  cursor: 'pointer',
+                  fontWeight: 600,
+                  textDecoration: 'underline',
+                  padding: '0 2px',
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.color = '#3b82f6')}
+                onMouseLeave={(e) => (e.currentTarget.style.color = '#60a5fa')}
+              >
+                {part}
+              </span>
+            );
           }
-          return child;
+          return part;
         });
       }
-      return children;
+      
+      if (Array.isArray(node)) {
+        return node.map((child, idx) => (
+          <span key={idx}>{makeInteractive(child)}</span>
+        ));
+      }
+      
+      return node;
     };
 
     return (
-      <div style={{ lineHeight: 1.8 }}>
+      <div style={{ lineHeight: 1.8, color: '#e5e7eb' }}>
         <ReactMarkdown
           components={{
-            // Process all text elements to handle citations
-            p: ({ children, ...props }) => (
-              <p {...props}>{processChildren(children)}</p>
+            p: ({ node, children, ...props }) => (
+              <p {...props} style={{ marginBottom: '0.75rem', marginTop: 0 }}>
+                {makeInteractive(children)}
+              </p>
             ),
-            strong: ({ children, ...props }) => (
-              <strong {...props} style={{ color: '#f59e0b', fontWeight: 700 }}>
-                {processChildren(children)}
+            strong: ({ node, children, ...props }) => (
+              <strong {...props} style={{ color: '#fbbf24', fontWeight: 700 }}>
+                {makeInteractive(children)}
               </strong>
             ),
-            em: ({ children, ...props }) => (
-              <em {...props}>{processChildren(children)}</em>
+            em: ({ node, children, ...props }) => (
+              <em {...props}>{makeInteractive(children)}</em>
             ),
-            li: ({ children, ...props }) => (
-              <li {...props} style={{ marginBottom: '0.25rem' }}>
-                {processChildren(children)}
+            li: ({ node, children, ...props }) => (
+              <li {...props} style={{ marginBottom: '0.5rem', lineHeight: 1.6 }}>
+                {makeInteractive(children)}
               </li>
             ),
-            ul: ({ children, ...props }) => (
-              <ul {...props} style={{ marginLeft: '1.5rem', marginTop: '0.5rem', marginBottom: '0.5rem' }}>
+            ul: ({ node, children, ...props }) => (
+              <ul {...props} style={{ 
+                marginLeft: '1.5rem', 
+                marginTop: '0.5rem', 
+                marginBottom: '0.75rem', 
+                paddingLeft: '0.5rem',
+                listStyleType: 'disc'
+              }}>
                 {children}
               </ul>
             ),
-            ol: ({ children, ...props }) => (
-              <ol {...props} style={{ marginLeft: '1.5rem', marginTop: '0.5rem', marginBottom: '0.5rem' }}>
+            ol: ({ node, children, ...props }) => (
+              <ol {...props} style={{ 
+                marginLeft: '1.5rem', 
+                marginTop: '0.5rem', 
+                marginBottom: '0.75rem', 
+                paddingLeft: '0.5rem'
+              }}>
                 {children}
               </ol>
             ),
