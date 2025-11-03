@@ -148,8 +148,10 @@ def get_fresh_stream_url(link: str, clip_index: Optional[int] = None, timeout: i
     """
     Return a short-lived direct MP4 URL. If clip_index is provided (1-based),
     use --playlist-items to target that clip in a sidecar.
+    Works for Instagram and Facebook (requires cookies for some private/age-gated content).
     """
     cookies_arg = _cookies_args()
+    # Prefer mp4 with audio+video; fall back to best available
     base = [YTDLP_BIN, *cookies_arg, "-f", "best[ext=mp4][acodec!=none][vcodec!=none]/best"]
     if clip_index:
         base += ["--playlist-items", str(clip_index)]
@@ -163,10 +165,49 @@ def get_fresh_stream_url(link: str, clip_index: Optional[int] = None, timeout: i
         raise CommandError("No URL returned by yt-dlp")
     return url
 
-
+def download_video(link: str, clip_index: Optional[int] = None, timeout_probe: int = 25, timeout_remux: int = 300) -> Path:
+    """
+    Convenience helper: resolve a direct stream URL then remux to local MP4.
+    """
+    # Optional: quick probe to fail early if totally unsupported
+    try:
+        _ = get_meta(link, timeout=timeout_probe)
+    except Exception as e:
+        # Not fatal in all cases, but helpful to surface auth/login issues early
+        print(f"[download_video] probe warning: {e}")
+    direct = get_fresh_stream_url(link, clip_index=clip_index, timeout=timeout_probe)
+    return remux_to_temp_mp4(direct, timeout=timeout_remux)
 
 def safe_unlink(p: Path) -> None:
     try:
         p.unlink(missing_ok=True)
     except Exception:
         pass
+
+# --- Optional back-compat: minimal image downloader (for legacy imports) ---
+
+def download_image(image_url: str, output_path: Optional[Path] = None) -> Path:
+    """
+    Minimal shim kept only so older code importing `download_image` doesn't break.
+    We don't do any image processing; just download bytes to a .jpg on disk.
+    """
+    if not output_path:
+        output_path = TMP_DIR / f"{uuid.uuid4().hex}.jpg"
+    try:
+        # Local import to avoid hard dependency if never used
+        import requests  # type: ignore
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+        with requests.get(image_url, headers=headers, timeout=30, stream=True) as r:
+            r.raise_for_status()
+            with open(output_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+        return output_path
+    except Exception as e:
+        raise CommandError(f"Image download failed: {type(e).__name__}: {e}")
