@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { ingestUrl, getStreamUrl, generateTranscript, getTranscript, putTranscript, getVideoMeta } from '../api';
+import { ingestUrl, getStreamUrl, generateTranscript, getTranscript, putTranscript, getVideoMeta, listTranscripts, type VideoSummary } from '../api';
+import VideoMetadata from '../components/VideoMetadata';
 
 export default function IngestPage(){
   const [link, setLink] = useState('');
@@ -8,8 +9,8 @@ export default function IngestPage(){
   const [transcript, setTranscript] = useState<string>('');
   const [loading, setLoading] = useState<string | null>(null);
 
-  // caption + multi-clip support
-  const [description, setDescription] = useState<string>('');
+  // Video metadata
+  const [videoData, setVideoData] = useState<Partial<VideoSummary> | null>(null);
   const [clipCount, setClipCount] = useState<number>(1);
   const [clip, setClip] = useState<number>(1);
 
@@ -20,7 +21,7 @@ export default function IngestPage(){
 
   // pretty view state
   const [pretty, setPretty] = useState(true);
-  const [showCaption, setShowCaption] = useState(true);
+  const [showMetadata, setShowMetadata] = useState(true);
   const [textSize, setTextSize] = useState(16); // adjustable text size
   const [displayHeight, setDisplayHeight] = useState(650); // adjustable height
 
@@ -50,12 +51,31 @@ export default function IngestPage(){
     setLoading('ingesting');
     setStatusMsg(null);
     try{
-      const { video_id } = await ingestUrl(link);
+      const result = await ingestUrl(link);
+      if (result.already_exists) {
+        setStatusMsg('⚠️ Video already exists, loading existing data...');
+      }
+      const { video_id } = result;
       setVideoId(video_id);
-      // fetch meta (caption + clip_count)
-      const meta = await getVideoMeta(video_id).catch(()=>({ clip_count: 1, description: '' }));
-      setClipCount(meta.clip_count || 1);
-      setDescription(meta.description || '');
+      
+      // Fetch full video metadata from list endpoint
+      const videos = await listTranscripts();
+      const currentVideo = videos.find(v => v.id === video_id);
+      
+      if (currentVideo) {
+        setVideoData(currentVideo);
+        setClipCount(currentVideo.clip_count || 1);
+      } else {
+        // Fallback to meta endpoint
+        const meta = await getVideoMeta(video_id).catch(()=>({ clip_count: 1, description: '' }));
+        setClipCount(meta.clip_count || 1);
+        setVideoData({ 
+          id: video_id, 
+          description: meta.description,
+          clip_count: meta.clip_count 
+        });
+      }
+      
       setClip(1);
       await refreshStream(video_id, 1);
       await reloadTranscript(video_id);
@@ -176,22 +196,14 @@ export default function IngestPage(){
 
       {/* Right: transcript viewer/editor (with pretty/JSON view) */}
       <div className="card">
-        {/* Caption section - above transcript */}
-        {description && (
-          <div style={{ marginBottom: 16 }}>
-            <div className="row" style={{ alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-              <h3 className="section-title" style={{ margin: 0 }}>Caption</h3>
-              <label className="text-xs text-gray-600" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <input type="checkbox" checked={showCaption} onChange={e => setShowCaption(e.target.checked)} />
-                Show caption
-              </label>
-            </div>
-            {showCaption && (
-              <div style={{ background: '#0b1220', border: '1px solid #1f2937', borderRadius: 8, padding: 12 }}>
-                <pre style={captionStyle}>{description}</pre>
-              </div>
-            )}
-          </div>
+        {/* Video metadata section - above transcript */}
+        {videoData && (
+          <VideoMetadata 
+            video={videoData} 
+            showToggle={true}
+            onToggleVisibility={setShowMetadata}
+            initiallyVisible={showMetadata}
+          />
         )}
 
         <div className="row" style={{ alignItems: 'center', justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
@@ -279,4 +291,3 @@ function Section({ title, body, children, textSize = 16 }: { title: string; body
 }
 function Divider(){ return <div style={{ height: 1, background: '#1f2937' }} />; }
 const taStyle: React.CSSProperties = { minHeight: 650, padding: 20, fontFamily:'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace', lineHeight: 1.8, background: '#0b1220', color: '#e5e7eb', borderColor: '#1f2937', resize: 'vertical' };
-const captionStyle: React.CSSProperties = { margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 13, lineHeight: 1.5 };

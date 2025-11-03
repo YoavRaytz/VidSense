@@ -87,13 +87,62 @@ def get_meta(link: str, timeout: int = 25) -> Dict[str, Any]:
     except subprocess.CalledProcessError as e:
         raise CommandError(f"yt-dlp -J failed: {e.output[-500:]}")
     data = json.loads(out)
+    
     # normalize: count clips and caption/description
     if "entries" in data and isinstance(data["entries"], list):
         clip_count = sum(1 for e in data["entries"] if e and (e.get("url") or e.get("formats")))
+        # For multi-video posts, use first entry's metadata
+        first_entry = next((e for e in data["entries"] if e), {})
+        metadata_source = {**data, **first_entry}  # Merge with preference for entry data
     else:
         clip_count = 1
-    description = (data.get("description") or data.get("fulltitle") or "").strip()
-    return {"raw": data, "clip_count": max(1, clip_count), "description": description}
+        metadata_source = data
+    
+    description = (metadata_source.get("description") or metadata_source.get("fulltitle") or "").strip()
+    
+    # Extract all useful metadata fields (return full data structure)
+    return {
+        "raw": data,
+        "clip_count": max(1, clip_count),
+        "description": description,
+        # Platform/source
+        "extractor": metadata_source.get("extractor"),
+        "extractor_key": metadata_source.get("extractor_key"),
+        # Basic info
+        "title": metadata_source.get("title") or metadata_source.get("fulltitle"),
+        "uploader": metadata_source.get("uploader"),
+        "uploader_id": metadata_source.get("uploader_id"),
+        "uploader_url": metadata_source.get("uploader_url"),
+        "creator": metadata_source.get("creator"),
+        "channel": metadata_source.get("channel"),
+        "channel_id": metadata_source.get("channel_id"),
+        "channel_url": metadata_source.get("channel_url"),
+        # Video properties
+        "duration": metadata_source.get("duration"),
+        "width": metadata_source.get("width"),
+        "height": metadata_source.get("height"),
+        "fps": metadata_source.get("fps"),
+        "resolution": metadata_source.get("resolution"),
+        "format": metadata_source.get("format"),
+        # Engagement metrics
+        "view_count": metadata_source.get("view_count"),
+        "like_count": metadata_source.get("like_count"),
+        "dislike_count": metadata_source.get("dislike_count"),
+        "comment_count": metadata_source.get("comment_count"),
+        "repost_count": metadata_source.get("repost_count"),
+        # Additional metadata
+        "upload_date": metadata_source.get("upload_date"),
+        "timestamp": metadata_source.get("timestamp"),
+        "thumbnail": metadata_source.get("thumbnail"),
+        "categories": metadata_source.get("categories", []),
+        "tags": metadata_source.get("tags", []),
+        "is_live": metadata_source.get("is_live"),
+        "availability": metadata_source.get("availability"),
+        "age_limit": metadata_source.get("age_limit"),
+        # Platform-specific (TikTok)
+        "track": metadata_source.get("track"),
+        "artist": metadata_source.get("artist"),
+    }
 
 def get_fresh_stream_url(link: str, clip_index: Optional[int] = None, timeout: int = 20) -> str:
     """

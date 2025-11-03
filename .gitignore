@@ -110,3 +110,21 @@ frontend/.env.*
 assets/
 downloads/
 uploads/
+
+# =========================================
+# 🧪 Debug/Test Scripts (don't commit)
+# =========================================
+backend/check_db.py
+backend/clean_old_videos.py
+backend/debug_metadata.py
+backend/update_metadata.py
+backend/migrate_embeddings.py
+test_extractors.py
+
+# =========================================
+# 📝 Optional Documentation (choose what to keep)
+# =========================================
+METADATA_EXTRACTION_SUMMARY.md
+VIDEO_CARD_COMPONENT.md
+VIDEO_METADATA_INTEGRATION.md
+# Keep ADDING_SOURCES.md - it's useful reference

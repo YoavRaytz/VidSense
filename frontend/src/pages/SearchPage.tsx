@@ -1,7 +1,8 @@
 import { useState, useRef } from 'react';
-import { searchVideos, ragAnswer, getStreamUrl, getTranscript, getVideoMeta, type SearchHit, type RAGResponse } from '../api';
+import { searchVideos, ragAnswer, getStreamUrl, getTranscript, getVideoMeta, listTranscripts, type SearchHit, type RAGResponse } from '../api';
 import VideoPlayer from '../components/VideoPlayer';
 import TranscriptViewer from '../components/TranscriptViewer';
+import VideoMetadata from '../components/VideoMetadata';
 import ReactMarkdown from 'react-markdown';
 
 interface VideoDetail extends SearchHit {
@@ -25,6 +26,9 @@ export default function SearchPage() {
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
   const [transcript, setTranscript] = useState('');
   const [clip, setClip] = useState(1);
+  
+  // Metadata visibility toggle
+  const [showMetadata, setShowMetadata] = useState(true);
   
   // References for scrolling
   const sourceRefs = useRef<{[key: string]: HTMLDivElement | null}>({});
@@ -72,13 +76,17 @@ export default function SearchPage() {
 
   async function handleVideoClick(hit: SearchHit) {
     try {
-      // Get video metadata
-      const meta = await getVideoMeta(hit.video_id);
+      // Get full video metadata from list endpoint
+      const videos = await listTranscripts();
+      const fullVideo = videos.find(v => v.id === hit.video_id);
       
-      const videoDetail: VideoDetail = {
+      const videoDetail: VideoDetail = fullVideo ? {
         ...hit,
-        clip_count: meta.clip_count || 1,
-        description: meta.description || hit.description
+        ...fullVideo,
+        clip_count: fullVideo.clip_count || 1,
+      } : {
+        ...hit,
+        clip_count: 1,
       };
       
       setSelectedVideo(videoDetail);
@@ -244,11 +252,6 @@ export default function SearchPage() {
         <div className="grid-2">
           {/* Left: video player */}
           <div className="card">
-            <h3 className="section-title">{selectedVideo.title || 'Video'}</h3>
-            {selectedVideo.author && (
-              <p className="muted" style={{ margin: '0 0 12px 0' }}>by {selectedVideo.author}</p>
-            )}
-            
             {selectedVideo.clip_count > 1 && (
               <div className="alert" style={{ marginBottom: 10 }}>
                 📚 This post has <b>{selectedVideo.clip_count}</b> videos.
@@ -264,12 +267,21 @@ export default function SearchPage() {
             />
           </div>
 
-          {/* Right: transcript */}
-          <TranscriptViewer
-            transcript={transcript}
-            description={selectedVideo.description || undefined}
-            readOnly={true}
-          />
+          {/* Right: metadata + transcript */}
+          <div className="card">
+            <VideoMetadata 
+              video={selectedVideo as any}
+              showToggle={true}
+              onToggleVisibility={setShowMetadata}
+              initiallyVisible={showMetadata}
+            />
+            
+            <TranscriptViewer
+              transcript={transcript}
+              description={selectedVideo.description || undefined}
+              readOnly={true}
+            />
+          </div>
         </div>
       </div>
     );

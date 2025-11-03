@@ -27,6 +27,18 @@ export interface VideoSummary {
   title?: string | null;
   author?: string | null;
   duration_sec?: number | null;
+  clip_count?: number;
+  description?: string | null;
+  hashtags?: string[];
+  metadata_json?: {
+    platform?: string;
+    like_count?: number;
+    comment_count?: number;
+    view_count?: number;
+    upload_date?: string;
+    thumbnail?: string;
+    [key: string]: any;
+  };
   media_path?: string | null;
   created_at?: string;
 }
@@ -87,7 +99,15 @@ export async function ingestUrl(link: string) {
     body: JSON.stringify({ link })
   });
   if (!r.ok) throw new Error(`ingest_url failed: ${r.status}`);
-  return r.json() as Promise<{ video_id: string; clip_count?: number; description?: string }>;
+  return r.json() as Promise<{ 
+    video_id: string; 
+    clip_count?: number; 
+    description?: string;
+    title?: string;
+    author?: string;
+    hashtags?: string[];
+    already_exists?: boolean;
+  }>;
 }
 
 // Video meta (caption + clip_count)

@@ -25,6 +25,7 @@ from .stream_utils import (
 )
 
 from .transcribe.gemini_client import GeminiTranscriber
+from .metadata_extractors import MetadataExtractor
 import os, json, traceback  # <-- add traceback here
 
 
@@ -54,6 +55,8 @@ class VideoOut(BaseModel):
     description: str | None
     clip_count: int
     duration_sec: int | None
+    hashtags: list[str] | None
+    metadata_json: dict | None
     media_path: str | None
     created_at: str | None
 
@@ -87,6 +90,8 @@ def list_videos(db: Session = Depends(get_db)):
             'description': v.description,
             'clip_count': v.clip_count,
             'duration_sec': v.duration_sec,
+            'hashtags': v.hashtags if v.hashtags else [],
+            'metadata_json': v.metadata_json if v.metadata_json else {},
             'media_path': v.media_path,
             'created_at': created_str
         })
@@ -114,6 +119,20 @@ def delete_video(video_id: str, db: Session = Depends(get_db)):
 
 @router.post("/ingest_url")
 def ingest_url(payload: IngestURL, db: Session = Depends(get_db)):
+    # Check if video already exists
+    existing = db.query(Video).filter(Video.url == payload.link).first()
+    if existing:
+        print(f"[ingest_url] Video already exists: {existing.id}")
+        return {
+            "video_id": existing.id,
+            "title": existing.title,
+            "clip_count": existing.clip_count,
+            "description": existing.description,
+            "author": existing.author,
+            "already_exists": True,
+            "message": "Video already ingested, returning existing record"
+        }
+    
     vid = uuid4().hex
     v = Video(
         id=vid,
@@ -124,11 +143,30 @@ def ingest_url(payload: IngestURL, db: Session = Depends(get_db)):
     db.add(v)
     try:
         db.flush()
-        # pull metadata (caption + clip count)
+        # pull metadata using source-specific extractor
         try:
-            meta = get_meta(payload.link)
-            v.description = meta.get("description") or None
-            v.clip_count = int(meta.get("clip_count") or 1)
+            raw_meta = get_meta(payload.link)
+            print(f"[ingest_url] raw metadata keys: {list(raw_meta.keys())}")
+            
+            # Use source-specific extractor
+            extractor = MetadataExtractor(raw_meta)
+            extracted = extractor.extract()
+            
+            print(f"[ingest_url] detected source: {extractor.source}")
+            
+            # Apply extracted metadata to video object
+            v.title = extracted.get("title")
+            v.description = extracted.get("description")
+            v.clip_count = extracted.get("clip_count", 1)
+            v.author = extracted.get("author")
+            v.duration_sec = extracted.get("duration_sec")
+            v.hashtags = extracted.get("hashtags", [])
+            v.metadata_json = extracted.get("metadata_json", {})
+            
+            print(f"[ingest_url] title='{v.title}', author='{v.author}', "
+                  f"hashtags={len(v.hashtags or [])}, "
+                  f"platform={v.metadata_json.get('platform') if v.metadata_json else 'unknown'}")
+            
         except CommandError as e:
             # non-fatal: still allow ingest
             print(f"[ingest_url][meta warn] {e}")
@@ -137,7 +175,15 @@ def ingest_url(payload: IngestURL, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(500, f"DB error: {e}")
 
-    return {"video_id": v.id, "clip_count": v.clip_count, "description": v.description}
+    return {
+        "video_id": v.id,
+        "title": v.title,
+        "clip_count": v.clip_count,
+        "description": v.description,
+        "author": v.author,
+        "hashtags": v.hashtags,
+        "already_exists": False
+    }
 
 
 @router.get("/{video_id}/meta")

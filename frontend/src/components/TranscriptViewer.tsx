@@ -31,7 +31,6 @@ export default function TranscriptViewer({
   readOnly = false
 }: TranscriptViewerProps) {
   const [pretty, setPretty] = useState(true);
-  const [showCaption, setShowCaption] = useState(true);
   const [textSize, setTextSize] = useState(16);
   const [displayHeight, setDisplayHeight] = useState(650);
 
@@ -39,24 +38,6 @@ export default function TranscriptViewer({
 
   return (
     <div className="card">
-      {/* Caption section */}
-      {description && (
-        <div style={{ marginBottom: 16 }}>
-          <div className="row" style={{ alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-            <h3 className="section-title" style={{ margin: 0 }}>Caption</h3>
-            <label className="text-xs text-gray-600" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <input type="checkbox" checked={showCaption} onChange={e => setShowCaption(e.target.checked)} />
-              Show caption
-            </label>
-          </div>
-          {showCaption && (
-            <div style={{ background: '#0b1220', border: '1px solid #1f2937', borderRadius: 8, padding: 12 }}>
-              <pre style={captionStyle}>{description}</pre>
-            </div>
-          )}
-        </div>
-      )}
-
       {/* Transcript header with controls */}
       <div className="row" style={{ alignItems: 'center', justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
         <h3 className="section-title" style={{ margin: 0 }}>Transcript</h3>
@@ -188,14 +169,6 @@ const taStyle: React.CSSProperties = {
   color: '#e5e7eb', 
   borderColor: '#1f2937', 
   resize: 'vertical' 
-};
-
-const captionStyle: React.CSSProperties = { 
-  margin: 0, 
-  whiteSpace: 'pre-wrap', 
-  wordBreak: 'break-word', 
-  fontSize: 13, 
-  lineHeight: 1.5 
 };
 
 function Section({ title, body, children, textSize = 16 }: { 

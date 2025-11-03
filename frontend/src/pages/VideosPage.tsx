@@ -3,6 +3,8 @@ import { listTranscripts, getStreamUrl, getTranscript, getVideoMeta, deleteVideo
 import type { VideoSummary } from '../api';
 import VideoPlayer from '../components/VideoPlayer';
 import TranscriptViewer from '../components/TranscriptViewer';
+import VideoCard from '../components/VideoCard';
+import VideoMetadata from '../components/VideoMetadata';
 
 interface VideoDetail extends VideoSummary {
   description?: string | null;
@@ -27,6 +29,9 @@ export default function VideosPage() {
   // Edit state
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  
+  // Metadata visibility toggle
+  const [showMetadata, setShowMetadata] = useState(true);
 
   useEffect(() => {
     loadVideos();
@@ -178,26 +183,6 @@ export default function VideosPage() {
     }
   }
 
-  function formatDate(dateStr?: string | null) {
-    if (!dateStr) return '';
-    try {
-      return new Date(dateStr).toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric'
-      });
-    } catch {
-      return '';
-    }
-  }
-
-  function formatDuration(sec?: number | null) {
-    if (!sec) return '';
-    const mins = Math.floor(sec / 60);
-    const secs = sec % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  }
-
   // Detail view
   if (selectedVideo) {
     return (
@@ -207,11 +192,6 @@ export default function VideosPage() {
           <div className="row" style={{ marginBottom: 12, alignItems: 'center', justifyContent: 'space-between' }}>
             <button className="btn" onClick={handleBack}>← Back to List</button>
           </div>
-          
-          <h3 className="section-title">{selectedVideo.title || 'Video'}</h3>
-          {selectedVideo.author && (
-            <p className="muted" style={{ margin: '0 0 12px 0' }}>by {selectedVideo.author}</p>
-          )}
           
           {selectedVideo.clip_count > 1 && (
             <div className="alert" style={{ marginBottom: 10 }}>
@@ -228,16 +208,25 @@ export default function VideosPage() {
           />
         </div>
 
-        {/* Right: transcript */}
-        <TranscriptViewer
-          transcript={transcript}
-          description={selectedVideo.description || undefined}
-          onTranscriptChange={setTranscript}
-          onSave={handleSaveTranscript}
-          saving={saving}
-          statusMsg={statusMsg}
-          readOnly={false}
-        />
+        {/* Right: metadata + transcript */}
+        <div className="card">
+          <VideoMetadata 
+            video={selectedVideo}
+            showToggle={true}
+            onToggleVisibility={setShowMetadata}
+            initiallyVisible={showMetadata}
+          />
+          
+          <TranscriptViewer
+            transcript={transcript}
+            description={selectedVideo.description || undefined}
+            onTranscriptChange={setTranscript}
+            onSave={handleSaveTranscript}
+            saving={saving}
+            statusMsg={statusMsg}
+            readOnly={false}
+          />
+        </div>
       </div>
     );
   }
@@ -306,110 +295,19 @@ export default function VideosPage() {
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {videos.map(video => (
-            <div
+            <VideoCard
               key={video.id}
+              video={video}
               onClick={() => !selectionMode && handleVideoClick(video)}
-              style={{
-                padding: 16,
-                background: '#0b1220',
-                border: '1px solid #1f2937',
-                borderRadius: 8,
-                cursor: selectionMode ? 'default' : 'pointer',
-                transition: 'border-color 0.15s ease, background 0.15s ease',
-                position: 'relative',
-              }}
-              onMouseEnter={e => {
-                setHoveredVideoId(video.id);
-                if (!selectionMode) {
-                  e.currentTarget.style.borderColor = '#3b82f6';
-                  e.currentTarget.style.background = '#0f1420';
-                }
-              }}
-              onMouseLeave={e => {
-                setHoveredVideoId(null);
-                e.currentTarget.style.borderColor = '#1f2937';
-                e.currentTarget.style.background = '#0b1220';
-              }}
-            >
-              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
-                <div style={{ flex: 1, display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-                  {selectionMode && (
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.has(video.id)}
-                      onChange={(e) => toggleSelection(video.id, e)}
-                      onClick={(e) => e.stopPropagation()}
-                      style={{
-                        width: 18,
-                        height: 18,
-                        cursor: 'pointer',
-                        marginTop: 2,
-                      }}
-                    />
-                  )}
-                  <div style={{ flex: 1 }}>
-                    <h4 style={{ margin: '0 0 4px 0', fontSize: 16, fontWeight: 600 }}>
-                      {video.title || 'Untitled Video'}
-                    </h4>
-                    {video.author && (
-                      <p className="muted" style={{ margin: '0 0 4px 0', fontSize: 13 }}>
-                        by {video.author}
-                      </p>
-                    )}
-                  </div>
-                </div>
-                <div style={{ display: 'flex', gap: 12, alignItems: 'center', position: 'relative' }}>
-                  {video.duration_sec && (
-                    <span className="muted" style={{ fontSize: 13 }}>
-                      ⏱️ {formatDuration(video.duration_sec)}
-                    </span>
-                  )}
-                  {video.clip_count > 1 && (
-                    <span className="muted" style={{ fontSize: 13 }}>
-                      📚 {video.clip_count} clips
-                    </span>
-                  )}
-                  {!selectionMode && hoveredVideoId === video.id && (
-                    <button
-                      onClick={(e) => handleDelete(video.id, e)}
-                      style={{
-                        padding: '6px 12px',
-                        backgroundColor: '#dc3545',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: 'pointer',
-                        fontSize: '0.85rem',
-                        transition: 'background-color 0.2s',
-                        fontWeight: 500,
-                      }}
-                      onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#c82333')}
-                      onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = '#dc3545')}
-                    >
-                      Delete
-                    </button>
-                  )}
-                </div>
-              </div>
-              
-              <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
-                <span style={{ 
-                  fontSize: 11, 
-                  padding: '2px 8px', 
-                  background: '#1f2937', 
-                  borderRadius: 4,
-                  textTransform: 'uppercase',
-                  letterSpacing: 0.5
-                }}>
-                  {video.source}
-                </span>
-                {video.created_at && (
-                  <span className="muted" style={{ fontSize: 12 }}>
-                    {formatDate(video.created_at)}
-                  </span>
-                )}
-              </div>
-            </div>
+              onDelete={(e) => handleDelete(video.id, e)}
+              isHovered={hoveredVideoId === video.id}
+              onMouseEnter={() => setHoveredVideoId(video.id)}
+              onMouseLeave={() => setHoveredVideoId(null)}
+              showCheckbox={selectionMode}
+              isSelected={selectedIds.has(video.id)}
+              onToggleSelection={(e) => toggleSelection(video.id, e)}
+              showDeleteButton={!selectionMode}
+            />
           ))}
         </div>
       )}
