@@ -41,6 +41,8 @@ export interface VideoSummary {
   };
   media_path?: string | null;
   created_at?: string;
+  score?: number;
+  snippet?: string;
 }
 
 export interface TranscriptDTO {
@@ -204,5 +206,54 @@ export async function ragAnswer(query: string, k_ann: number = 20, k_final: numb
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query, k_ann, k_final }),
+  });
+}
+
+// =============================================================================
+// Collections endpoints
+// =============================================================================
+
+export interface Collection {
+  id: string;
+  query: string;
+  ai_answer: string | null;
+  video_ids: string[];
+  metadata_json: Record<string, any>;
+  created_at: string;
+}
+
+export interface CollectionWithVideos extends Collection {
+  videos: VideoSummary[];
+}
+
+export async function saveCollection(
+  query: string,
+  aiAnswer: string | null,
+  videoIds: string[],
+  metadata?: Record<string, any>
+) {
+  return jsonFetch<Collection>(`${API_BASE}/collections/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      query,
+      ai_answer: aiAnswer,
+      video_ids: videoIds,
+      metadata_json: metadata || {},
+    }),
+  });
+}
+
+export async function getCollections() {
+  return jsonFetch<Collection[]>(`${API_BASE}/collections/`);
+}
+
+export async function getCollection(collectionId: string) {
+  return jsonFetch<CollectionWithVideos>(`${API_BASE}/collections/${collectionId}`);
+}
+
+export async function deleteCollection(collectionId: string) {
+  return jsonFetch<{ message: string; collection_id: string }>(`${API_BASE}/collections/${collectionId}`, {
+    method: 'DELETE',
   });
 }

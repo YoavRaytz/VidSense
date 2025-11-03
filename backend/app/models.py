@@ -28,3 +28,13 @@ class Transcript(Base):
     summary = Column(Text, nullable=True)
     embedding = Column(Vector(384))
     updated_at = Column(DateTime, onupdate=func.now(), server_default=func.now())
+
+class Collection(Base):
+    __tablename__ = 'collections'
+    id = Column(String, primary_key=True)
+    query = Column(Text, nullable=False)  # Original search query
+    ai_answer = Column(Text, nullable=True)  # AI-generated answer
+    video_ids = Column(JSONB, default=list)  # List of relevant video IDs
+    metadata_json = Column(JSONB, default=dict)  # Additional metadata (scores, etc.)
+    created_at = Column(DateTime, server_default=func.now())
+

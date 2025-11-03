@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { searchVideos, ragAnswer, getStreamUrl, getTranscript, getVideoMeta, listTranscripts, type SearchHit, type RAGResponse } from '../api';
+import { searchVideos, ragAnswer, getStreamUrl, getTranscript, getVideoMeta, listTranscripts, saveCollection, type SearchHit, type RAGResponse } from '../api';
 import VideoPlayer from '../components/VideoPlayer';
 import TranscriptViewer from '../components/TranscriptViewer';
 import VideoMetadata from '../components/VideoMetadata';
@@ -13,6 +13,7 @@ export default function SearchPage() {
   const [query, setQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [saving, setSaving] = useState(false);
   
   // Search results
   const [searchResults, setSearchResults] = useState<SearchHit[]>([]);
@@ -71,6 +72,39 @@ export default function SearchPage() {
       alert(`Answer generation failed: ${e}`);
     } finally {
       setGenerating(false);
+    }
+  }
+
+  async function handleSaveCollection() {
+    if (!ragResponse) return;
+    
+    setSaving(true);
+    
+    try {
+      const videoIds = ragResponse.sources.map(s => s.video_id);
+      // Store sources with their scores and order
+      const sourcesData = ragResponse.sources.map((s, idx) => ({
+        video_id: s.video_id,
+        title: s.title,
+        author: s.author,
+        url: s.url,
+        snippet: s.snippet,
+        score: s.score,
+        order: idx,
+      }));
+      
+      await saveCollection(query, ragResponse.answer, videoIds, {
+        sources: sourcesData,
+        sources_count: ragResponse.sources.length,
+        search_query: searchQuery,
+      });
+      
+      alert('✅ Collection saved successfully!');
+    } catch (e) {
+      console.error('Save failed:', e);
+      alert(`Failed to save collection: ${e}`);
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -329,11 +363,34 @@ export default function SearchPage() {
       {/* RAG Answer */}
       {ragResponse && (
         <div className="card" style={{ background: 'linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%)', border: '1px solid #2563eb' }}>
-          <div className="row" style={{ marginBottom: 12, alignItems: 'center' }}>
-            <h3 className="section-title" style={{ margin: 0, color: '#93c5fd' }}>✨ AI Answer</h3>
-            <span className="muted" style={{ fontSize: 13 }}>
-              Based on {ragResponse.sources.length} source{ragResponse.sources.length > 1 ? 's' : ''}
-            </span>
+          <div className="row" style={{ marginBottom: 12, justifyContent: 'space-between', alignItems: 'center' }}>
+            <div className="row" style={{ alignItems: 'center', gap: 12 }}>
+              <h3 className="section-title" style={{ margin: 0, color: '#93c5fd' }}>✨ AI Answer</h3>
+              <span className="muted" style={{ fontSize: 13 }}>
+                Based on {ragResponse.sources.length} source{ragResponse.sources.length > 1 ? 's' : ''}
+              </span>
+            </div>
+            
+            <button
+              className="btn"
+              onClick={handleSaveCollection}
+              disabled={saving}
+              style={{
+                background: '#10b981',
+                border: 'none',
+                padding: '8px 16px',
+                fontSize: 14,
+                fontWeight: 600,
+              }}
+              onMouseEnter={(e) => {
+                if (!saving) e.currentTarget.style.background = '#059669';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = '#10b981';
+              }}
+            >
+              {saving ? '💾 Saving...' : '💾 Save to Collections'}
+            </button>
           </div>
           
           <div style={{
