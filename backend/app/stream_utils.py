@@ -117,6 +117,9 @@ def get_meta(link: str, timeout: int = 25) -> Dict[str, Any]:
         "channel": metadata_source.get("channel"),
         "channel_id": metadata_source.get("channel_id"),
         "channel_url": metadata_source.get("channel_url"),
+        # URLs
+        "webpage_url": metadata_source.get("webpage_url"),
+        "original_url": metadata_source.get("original_url"),
         # Video properties
         "duration": metadata_source.get("duration"),
         "width": metadata_source.get("width"),
@@ -211,3 +214,129 @@ def download_image(image_url: str, output_path: Optional[Path] = None) -> Path:
         return output_path
     except Exception as e:
         raise CommandError(f"Image download failed: {type(e).__name__}: {e}")
+
+
+def scrape_facebook_engagement(url: str, timeout: int = 15) -> Dict[str, Optional[int]]:
+    """
+    Scrape Facebook video engagement stats (likes, comments, shares) using Selenium.
+    Returns dict with like_count, comment_count, share_count (or None if not found).
+    
+    Note: This requires Selenium and may be blocked by Facebook's anti-bot measures.
+    """
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        import re
+        
+        print(f"[fb_scrape] Starting Selenium scrape for: {url[:60]}...")
+        
+        options = Options()
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        
+        # Try to load cookies if available
+        if YTDLP_COOKIES and not YTDLP_COOKIES.endswith('.txt'):
+            try:
+                options.add_argument(f"--load-extension={YTDLP_COOKIES}")
+            except:
+                pass
+        
+        driver = webdriver.Chrome(options=options)
+        driver.set_page_load_timeout(timeout)
+        
+        try:
+            driver.get(url)
+            
+            # Wait for page to load
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+            
+            # Get page HTML
+            html = driver.page_source
+            
+            # Extract counts using regex patterns
+            like_count = None
+            comment_count = None
+            share_count = None
+            
+            # Pattern 1: Look for reaction counts (likes)
+            like_patterns = [
+                r'"reaction_count":{"count":(\d+)',
+                r'"reactors":{"count":(\d+)',
+                r'(\d+(?:K|M)?)\s+(?:reactions?|likes?)',
+            ]
+            for pattern in like_patterns:
+                match = re.search(pattern, html, re.IGNORECASE)
+                if match:
+                    like_str = match.group(1)
+                    like_count = _parse_count(like_str)
+                    break
+            
+            # Pattern 2: Look for comment counts
+            comment_patterns = [
+                r'"comment_count":{"total_count":(\d+)',
+                r'"comments":{"total_count":(\d+)',
+                r'(\d+(?:K|M)?)\s+comments?',
+            ]
+            for pattern in comment_patterns:
+                match = re.search(pattern, html, re.IGNORECASE)
+                if match:
+                    comment_str = match.group(1)
+                    comment_count = _parse_count(comment_str)
+                    break
+            
+            # Pattern 3: Look for share counts
+            share_patterns = [
+                r'"share_count":{"count":(\d+)',
+                r'"shares":{"count":(\d+)',
+                r'(\d+(?:K|M)?)\s+shares?',
+            ]
+            for pattern in share_patterns:
+                match = re.search(pattern, html, re.IGNORECASE)
+                if match:
+                    share_str = match.group(1)
+                    share_count = _parse_count(share_str)
+                    break
+            
+            print(f"[fb_scrape] Found: likes={like_count}, comments={comment_count}, shares={share_count}")
+            
+            return {
+                "like_count": like_count,
+                "comment_count": comment_count,
+                "share_count": share_count,
+            }
+            
+        finally:
+            driver.quit()
+            
+    except ImportError:
+        print("[fb_scrape] Selenium not available, skipping engagement scraping")
+        return {"like_count": None, "comment_count": None, "share_count": None}
+    except Exception as e:
+        print(f"[fb_scrape] Error: {e}")
+        return {"like_count": None, "comment_count": None, "share_count": None}
+
+
+def _parse_count(count_str: str) -> Optional[int]:
+    """Parse count string like '1.2K' or '3M' to integer."""
+    if not count_str:
+        return None
+    
+    count_str = count_str.strip().upper()
+    
+    try:
+        if 'K' in count_str:
+            return int(float(count_str.replace('K', '')) * 1000)
+        elif 'M' in count_str:
+            return int(float(count_str.replace('M', '')) * 1000000)
+        else:
+            return int(count_str)
+    except:
+        return None

@@ -60,19 +60,28 @@ export default function VideoCard({
     return '🌐';
   }
 
-  function getInstagramProfileUrl(video: VideoSummary): string | null {
-    // Extract Instagram username from URL or metadata
-    const urlMatch = video.url?.match(/instagram\.com\/([^\/]+)\//);
-    if (urlMatch && urlMatch[1] !== 'reel' && urlMatch[1] !== 'p') {
-      return `https://www.instagram.com/${urlMatch[1]}/`;
+  function getProfileUrl(video: VideoSummary): string | null {
+    // First priority: use uploader_url or channel_url from metadata
+    if (video.metadata_json?.uploader_url) {
+      return video.metadata_json.uploader_url;
+    }
+    if (video.metadata_json?.channel_url) {
+      return video.metadata_json.channel_url;
     }
     
-    // Try to get from author or metadata
-    if (video.author) {
-      // Clean author name (remove emojis, special chars, get first part)
-      const cleanAuthor = video.author.split('|')[0].trim().toLowerCase().replace(/[^a-z0-9._]/g, '');
-      if (cleanAuthor) {
-        return `https://www.instagram.com/${cleanAuthor}/`;
+    // Fallback: Extract from URL (Instagram-specific for backward compatibility)
+    if (video.url?.includes('instagram.com')) {
+      const urlMatch = video.url.match(/instagram\.com\/([^\/]+)\//);
+      if (urlMatch && urlMatch[1] !== 'reel' && urlMatch[1] !== 'p') {
+        return `https://www.instagram.com/${urlMatch[1]}/`;
+      }
+      
+      // Try to get from author or metadata
+      if (video.author) {
+        const cleanAuthor = video.author.split('|')[0].trim().toLowerCase().replace(/[^a-z0-9._]/g, '');
+        if (cleanAuthor) {
+          return `https://www.instagram.com/${cleanAuthor}/`;
+        }
       }
     }
     
@@ -80,7 +89,7 @@ export default function VideoCard({
   }
 
   const platformEmoji = getPlatformEmoji(video.source);
-  const instagramProfile = getInstagramProfileUrl(video);
+  const profileUrl = getProfileUrl(video);
   
   return (
     <div
@@ -138,13 +147,13 @@ export default function VideoCard({
               {video.title || 'Untitled Video'}
             </h4>
             
-            {/* Author with Instagram link */}
+            {/* Author with profile link */}
             {video.author && (
               <div className="muted" style={{ margin: '0 0 8px 0', fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span>by</span>
-                {instagramProfile ? (
+                {profileUrl ? (
                   <a
-                    href={instagramProfile}
+                    href={profileUrl}
                     target="_blank"
                     rel="noopener noreferrer"
                     onClick={(e) => e.stopPropagation()}

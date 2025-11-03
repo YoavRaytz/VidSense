@@ -111,6 +111,8 @@ class InstagramExtractor(BaseExtractor):
             "upload_date": self.meta.get("upload_date"),
             "thumbnail": self.meta.get("thumbnail"),
             "uploader_id": self.meta.get("uploader_id"),  # Instagram handle
+            "uploader_url": self.meta.get("uploader_url"),
+            "channel_url": self.meta.get("channel_url"),
             **self._get_video_quality(),
         }
         
@@ -160,6 +162,8 @@ class TikTokExtractor(BaseExtractor):
             "upload_date": self.meta.get("upload_date"),
             "thumbnail": self.meta.get("thumbnail"),
             "uploader_id": self.meta.get("uploader_id"),  # TikTok username
+            "uploader_url": self.meta.get("uploader_url"),
+            "channel_url": self.meta.get("channel_url"),
             "music_title": self.meta.get("track"),
             "music_author": self.meta.get("artist"),
             **self._get_video_quality(),
@@ -184,6 +188,8 @@ class TwitterExtractor(BaseExtractor):
             "upload_date": self.meta.get("upload_date"),
             "thumbnail": self.meta.get("thumbnail"),
             "uploader_id": self.meta.get("uploader_id"),  # Twitter handle
+            "uploader_url": self.meta.get("uploader_url"),
+            "channel_url": self.meta.get("channel_url"),
             **self._get_video_quality(),
         }
         
@@ -196,15 +202,43 @@ class FacebookExtractor(BaseExtractor):
     def extract(self) -> Dict[str, Any]:
         base = self._get_base_fields()
         
+        # Construct Facebook profile URL from uploader_id if available
+        uploader_url = self.meta.get("uploader_url")
+        uploader_id = self.meta.get("uploader_id")
+        if not uploader_url and uploader_id:
+            # Facebook profile URL format: https://www.facebook.com/profile.php?id=USER_ID
+            uploader_url = f"https://www.facebook.com/profile.php?id={uploader_id}"
+        
+        # Try to scrape engagement stats (likes, comments, shares) from Facebook page
+        # This is optional and may fail due to Facebook anti-bot measures
+        engagement = {}
+        try:
+            from .stream_utils import scrape_facebook_engagement
+            video_url = self.meta.get("webpage_url") or self.meta.get("original_url")
+            if video_url:
+                engagement = scrape_facebook_engagement(video_url)
+                print(f"[FacebookExtractor] Scraped engagement: {engagement}")
+        except Exception as e:
+            print(f"[FacebookExtractor] Could not scrape engagement: {e}")
+        
         # Facebook-specific metadata
+        # Prefer scraped values (if not None), fall back to yt-dlp values (usually null)
+        # Use 'if is not None' to preserve distinction between 0 and None
+        scraped_likes = engagement.get("like_count")
+        scraped_comments = engagement.get("comment_count")
+        scraped_shares = engagement.get("share_count")
+        
         metadata_json = {
             "platform": "facebook",
             "view_count": self.meta.get("view_count"),
-            "like_count": self.meta.get("like_count"),
-            "comment_count": self.meta.get("comment_count"),
-            "share_count": self.meta.get("repost_count"),
+            "like_count": scraped_likes if scraped_likes is not None else self.meta.get("like_count"),
+            "comment_count": scraped_comments if scraped_comments is not None else self.meta.get("comment_count"),
+            "share_count": scraped_shares if scraped_shares is not None else self.meta.get("repost_count"),
             "upload_date": self.meta.get("upload_date"),
             "thumbnail": self.meta.get("thumbnail"),
+            "uploader_url": uploader_url,
+            "channel_url": self.meta.get("channel_url") or uploader_url,
+            "uploader_id": uploader_id,
             **self._get_video_quality(),
         }
         

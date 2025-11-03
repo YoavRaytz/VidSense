@@ -40,28 +40,36 @@ export default function VideoMetadata({
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Extract Instagram username from URL or author
-  const getInstagramProfileUrl = () => {
-    if (!video.url || platform.toLowerCase() !== 'instagram') return null;
-    
-    // Try to extract from URL
-    const urlMatch = video.url.match(/instagram\.com\/([^/]+)/);
-    if (urlMatch && urlMatch[1] !== 'reel' && urlMatch[1] !== 'p') {
-      return `https://www.instagram.com/${urlMatch[1]}/`;
+  // Get profile URL from metadata or fallback to URL extraction
+  const getProfileUrl = () => {
+    // First priority: use uploader_url or channel_url from metadata
+    if (video.metadata_json?.uploader_url) {
+      return video.metadata_json.uploader_url;
+    }
+    if (video.metadata_json?.channel_url) {
+      return video.metadata_json.channel_url;
     }
     
-    // Try to extract from author name
-    if (video.author) {
-      const cleanAuthor = video.author.split('|')[0].trim().toLowerCase().replace(/[^a-z0-9._]/g, '');
-      if (cleanAuthor) {
-        return `https://www.instagram.com/${cleanAuthor}/`;
+    // Fallback: Extract from URL (Instagram-specific for backward compatibility)
+    if (video.url?.includes('instagram.com')) {
+      const urlMatch = video.url.match(/instagram\.com\/([^/]+)/);
+      if (urlMatch && urlMatch[1] !== 'reel' && urlMatch[1] !== 'p') {
+        return `https://www.instagram.com/${urlMatch[1]}/`;
+      }
+      
+      // Try to extract from author name
+      if (video.author) {
+        const cleanAuthor = video.author.split('|')[0].trim().toLowerCase().replace(/[^a-z0-9._]/g, '');
+        if (cleanAuthor) {
+          return `https://www.instagram.com/${cleanAuthor}/`;
+        }
       }
     }
     
     return null;
   };
 
-  const instagramProfile = getInstagramProfileUrl();
+  const profileUrl = getProfileUrl();
   const duration = formatDuration(video.duration_sec);
   const likeCount = video.metadata_json?.like_count;
   const commentCount = video.metadata_json?.comment_count;
@@ -121,9 +129,9 @@ export default function VideoMetadata({
               {video.author && (
                 <>
                   <span style={{ color: '#6b7280' }}>•</span>
-                  {instagramProfile ? (
+                  {profileUrl ? (
                     <a 
-                      href={instagramProfile} 
+                      href={profileUrl} 
                       target="_blank" 
                       rel="noopener noreferrer"
                       style={{ 
