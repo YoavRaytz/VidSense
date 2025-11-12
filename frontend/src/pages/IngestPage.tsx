@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ingestUrl, getStreamUrl, generateTranscript, getTranscript, putTranscript, getVideoMeta, listTranscripts, type VideoSummary } from '../api';
+import { ingestUrl, getStreamUrl, generateTranscript, getTranscript, putTranscript, getVideo, listTranscripts, type VideoSummary } from '../api';
 import VideoMetadata from '../components/VideoMetadata';
 
 export default function IngestPage(){
@@ -66,14 +66,16 @@ export default function IngestPage(){
         setVideoData(currentVideo);
         setClipCount(currentVideo.clip_count || 1);
       } else {
-        // Fallback to meta endpoint
-        const meta = await getVideoMeta(video_id).catch(()=>({ clip_count: 1, description: '' }));
-        setClipCount(meta.clip_count || 1);
-        setVideoData({ 
-          id: video_id, 
-          description: meta.description,
-          clip_count: meta.clip_count 
-        });
+        // Fallback to single video endpoint
+        try {
+          const fullVideo = await getVideo(video_id);
+          setVideoData(fullVideo);
+          setClipCount(fullVideo.clip_count || 1);
+        } catch (e) {
+          console.error('Failed to fetch video details:', e);
+          setVideoData({ id: video_id, clip_count: 1 });
+          setClipCount(1);
+        }
       }
       
       setClip(1);

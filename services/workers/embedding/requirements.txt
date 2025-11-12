@@ -1,0 +1,8 @@
+celery
+redis
+sqlalchemy
+psycopg[binary]
+pgvector
+sentence-transformers
+torch
+numpy

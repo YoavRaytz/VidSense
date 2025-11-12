@@ -8,9 +8,8 @@ server: {
   host: true,
   proxy: {
     '/api': {
-      target: 'http://127.0.0.1:8080',
+      target: 'http://gateway:80',
       changeOrigin: true,
-      rewrite: p => p.replace(/^\/api/, ''), // backend has no /api prefix
     },
   },
 },

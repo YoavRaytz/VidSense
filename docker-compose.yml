@@ -1,0 +1,219 @@
+version: '3.8'
+
+services:
+  # ========================================
+  # API Gateway (Nginx)
+  # ========================================
+  gateway:
+    image: nginx:alpine
+    container_name: vidsense-gateway
+    ports:
+      - "80:80"
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - ingestion-service
+      - streaming-service
+      - search-service
+      - collections-service
+    networks:
+      - vidsense-network
+    restart: unless-stopped
+
+  # ========================================
+  # Ingestion Service (Port 8081)
+  # ========================================
+  ingestion-service:
+    build:
+      context: ./services/ingestion
+      dockerfile: Dockerfile
+    container_name: vidsense-ingestion
+    ports:
+      - "8081:8081"
+    environment:
+      - DATABASE_URL=postgresql+psycopg://tips:tips123@postgres:5432/tipsdb
+      - REDIS_URL=redis://redis:6379/0
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - YTDLP_COOKIES=${YTDLP_COOKIES:-chrome}
+    volumes:
+      # Hot-reload: mount source code
+      - ./services/ingestion/app:/app/app:ro
+      - /tmp/vidsense-videos:/tmp/app-videos
+    depends_on:
+      - redis
+    networks:
+      - vidsense-network
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8081 --reload
+
+  # ========================================
+  # Streaming Service (Port 8083)
+  # ========================================
+  streaming-service:
+    build:
+      context: ./services/streaming
+      dockerfile: Dockerfile
+    container_name: vidsense-streaming
+    ports:
+      - "8083:8083"
+    environment:
+      - DATABASE_URL=postgresql+psycopg://tips:tips123@postgres:5432/tipsdb
+    volumes:
+      # Hot-reload: mount source code
+      - ./services/streaming/app:/app/app:ro
+      - /tmp/vidsense-videos:/tmp/app-videos
+    networks:
+      - vidsense-network
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8083 --reload
+
+  # ========================================
+  # Search Service (Port 8082)
+  # ========================================
+  search-service:
+    build:
+      context: ./services/search
+      dockerfile: Dockerfile
+    container_name: vidsense-search
+    ports:
+      - "8082:8082"
+    environment:
+      - DATABASE_URL=postgresql+psycopg://tips:tips123@postgres:5432/tipsdb
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      # Hot-reload: mount source code
+      - ./services/search/app:/app/app:ro
+      # Cache models to avoid re-downloading
+      - vidsense-models:/root/.cache/huggingface
+    networks:
+      - vidsense-network
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8082 --reload
+
+  # ========================================
+  # Collections Service (Port 8084)
+  # ========================================
+  collections-service:
+    build:
+      context: ./services/collections
+      dockerfile: Dockerfile
+    container_name: vidsense-collections
+    ports:
+      - "8084:8084"
+    environment:
+      - DATABASE_URL=postgresql+psycopg://tips:tips123@postgres:5432/tipsdb
+    volumes:
+      # Hot-reload: mount source code
+      - ./services/collections/app:/app/app:ro
+    networks:
+      - vidsense-network
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8084 --reload
+
+  # ========================================
+  # Transcription Worker
+  # ========================================
+  transcription-worker:
+    build:
+      context: ./services/workers/transcription
+      dockerfile: Dockerfile
+    container_name: vidsense-transcription-worker
+    environment:
+      - DATABASE_URL=postgresql+psycopg://tips:tips123@postgres:5432/tipsdb
+      - REDIS_URL=redis://redis:6379/0
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      # Hot-reload: mount source code (only Python files, not the entire /app)
+      - ./services/workers/transcription/tasks.py:/app/tasks.py:ro
+      - ./services/workers/transcription/models.py:/app/models.py:ro
+      - ./services/workers/transcription/db.py:/app/db.py:ro
+      - ./services/workers/transcription/transcribe:/app/transcribe:ro
+      - /tmp/vidsense-videos:/tmp/app-videos
+    depends_on:
+      - redis
+    networks:
+      - vidsense-network
+    restart: unless-stopped
+    command: celery -A tasks worker --loglevel=info --concurrency=2
+
+  # ========================================
+  # Embedding Worker
+  # ========================================
+  embedding-worker:
+    build:
+      context: ./services/workers/embedding
+      dockerfile: Dockerfile
+    container_name: vidsense-embedding-worker
+    environment:
+      - DATABASE_URL=postgresql+psycopg://tips:tips123@postgres:5432/tipsdb
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      # Hot-reload: mount source code (only Python files, not the entire /app)
+      - ./services/workers/embedding/tasks.py:/app/tasks.py:ro
+      - ./services/workers/embedding/models.py:/app/models.py:ro
+      - ./services/workers/embedding/db.py:/app/db.py:ro
+      - ./services/workers/embedding/embeddings.py:/app/embeddings.py:ro
+      # Cache models
+      - vidsense-models:/root/.cache/huggingface
+    depends_on:
+      - redis
+    networks:
+      - vidsense-network
+    restart: unless-stopped
+    command: celery -A tasks worker --loglevel=info --concurrency=2
+
+  # ========================================
+  # Frontend (Port 5173)
+  # ========================================
+  frontend:
+    build:
+      context: .
+      dockerfile: ./services/frontend/Dockerfile
+    container_name: vidsense-frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_BASE=/api
+    volumes:
+      # Hot-reload: mount source code
+      - ./services/frontend/src:/app/src:ro
+      - ./services/frontend/index.html:/app/index.html:ro
+      - ./services/frontend/vite.config.ts:/app/vite.config.ts:ro
+    networks:
+      - vidsense-network
+    restart: unless-stopped
+    command: npm run dev -- --host 0.0.0.0 --port 5173
+
+  # ========================================
+  # Redis (Message Queue)
+  # ========================================
+  redis:
+    image: redis:alpine
+    container_name: vidsense-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - vidsense-network
+    restart: unless-stopped
+
+  # ========================================
+  # PostgreSQL (External - using existing)
+  # ========================================
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: vidsense-postgres
+    # Use your existing container ID
+    # If you want to use existing DB, comment out this service
+    # and update DATABASE_URL to point to your running container
+    external_links:
+      - 2f2f5ac5192e:postgres
+    networks:
+      - vidsense-network
+
+networks:
+  vidsense-network:
+    driver: bridge
+
+volumes:
+  vidsense-models:
+    driver: local

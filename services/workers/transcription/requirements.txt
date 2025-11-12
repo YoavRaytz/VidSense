@@ -1,0 +1,6 @@
+celery
+redis
+sqlalchemy
+psycopg[binary]
+pgvector
+google-genai
