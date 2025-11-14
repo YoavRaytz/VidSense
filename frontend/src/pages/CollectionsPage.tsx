@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { getCollections, deleteCollection, getCollection, Collection, CollectionWithVideos, getStreamUrl, getTranscript, listTranscripts, type VideoSummary } from '../api';
+import { getCollections, deleteCollection, getCollection, Collection, CollectionWithVideos, getStreamUrl, getTranscript, listTranscripts, saveRetrievalFeedback, getRetrievalFeedback, type VideoSummary } from '../api';
 import ReactMarkdown from 'react-markdown';
 import VideoPlayer from '../components/VideoPlayer';
 import TranscriptViewer from '../components/TranscriptViewer';
@@ -16,6 +16,10 @@ export default function CollectionsPage() {
   const [loadingExpanded, setLoadingExpanded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  
+  // Feedback state
+  const [feedback, setFeedback] = useState<{[videoId: string]: 'good' | 'bad' | null}>({});
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState<{[videoId: string]: boolean}>({});
   
   // Video detail view state (same as SearchPage)
   const [selectedVideo, setSelectedVideo] = useState<VideoDetail | null>(null);
@@ -67,12 +71,52 @@ export default function CollectionsPage() {
       try {
         const fullCollection = await getCollection(collectionId);
         setExpandedCollection(fullCollection);
+        
+        // Load existing feedback for these videos
+        if (fullCollection.videos && fullCollection.videos.length > 0) {
+          const videoIds = fullCollection.videos.map(v => v.id);
+          try {
+            const feedbackResponse = await getRetrievalFeedback(fullCollection.query, videoIds);
+            
+            // Convert feedback array to object for easy lookup
+            const feedbackMap: {[videoId: string]: 'good' | 'bad' | null} = {};
+            feedbackResponse.feedback.forEach(fb => {
+              feedbackMap[fb.video_id] = fb.feedback;
+            });
+            
+            setFeedback(feedbackMap);
+            console.log(`[collections] Loaded ${feedbackResponse.feedback.length} feedback records`);
+          } catch (error) {
+            console.error('[collections] Failed to load feedback:', error);
+            // Continue without feedback - not a critical error
+          }
+        }
       } catch (err: any) {
         alert('Failed to load collection details: ' + err.message);
         setExpandedId(null);
       } finally {
         setLoadingExpanded(false);
       }
+    }
+  };
+
+  const handleFeedback = async (videoId: string, feedbackType: 'good' | 'bad') => {
+    if (!expandedCollection) return;
+    
+    // Optimistic update
+    setFeedback(prev => ({ ...prev, [videoId]: feedbackType }));
+    setFeedbackSubmitting(prev => ({ ...prev, [videoId]: true }));
+    
+    try {
+      await saveRetrievalFeedback(expandedCollection.query, videoId, feedbackType);
+      console.log(`Feedback saved: ${feedbackType} for video ${videoId}`);
+    } catch (error) {
+      console.error('Failed to save feedback:', error);
+      // Revert on error
+      setFeedback(prev => ({ ...prev, [videoId]: null }));
+      alert('Failed to save feedback. Please try again.');
+    } finally {
+      setFeedbackSubmitting(prev => ({ ...prev, [videoId]: false }));
     }
   };
 
@@ -390,6 +434,18 @@ export default function CollectionsPage() {
                             <div
                               key={video.id}
                               onClick={() => handleVideoClick(video)}
+                              onMouseEnter={(e) => {
+                                e.currentTarget.style.borderColor = '#3b82f6';
+                                e.currentTarget.style.background = '#1f2937';
+                                const feedbackButtons = e.currentTarget.querySelector('.feedback-buttons') as HTMLElement;
+                                if (feedbackButtons) feedbackButtons.style.opacity = '1';
+                              }}
+                              onMouseLeave={(e) => {
+                                e.currentTarget.style.borderColor = '#334155';
+                                e.currentTarget.style.background = '#1e293b';
+                                const feedbackButtons = e.currentTarget.querySelector('.feedback-buttons') as HTMLElement;
+                                if (feedbackButtons) feedbackButtons.style.opacity = '0';
+                              }}
                               style={{
                                 padding: 16,
                                 background: '#1e293b',
@@ -397,16 +453,99 @@ export default function CollectionsPage() {
                                 borderRadius: 8,
                                 cursor: 'pointer',
                                 transition: 'all 0.2s ease',
-                              }}
-                              onMouseEnter={(e) => {
-                                e.currentTarget.style.borderColor = '#3b82f6';
-                                e.currentTarget.style.background = '#1f2937';
-                              }}
-                              onMouseLeave={(e) => {
-                                e.currentTarget.style.borderColor = '#334155';
-                                e.currentTarget.style.background = '#1e293b';
+                                position: 'relative',
                               }}
                             >
+                              {/* Feedback buttons (shown on hover) - positioned on right below match score */}
+                              <div
+                                style={{
+                                  position: 'absolute',
+                                  top: 48,
+                                  right: 12,
+                                  display: 'flex',
+                                  gap: 6,
+                                  opacity: 0,
+                                  transition: 'opacity 0.2s ease',
+                                  pointerEvents: 'auto',
+                                  zIndex: 10,
+                                }}
+                                className="feedback-buttons"
+                                onMouseEnter={(e) => {
+                                  e.currentTarget.style.opacity = '1';
+                                }}
+                              >
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleFeedback(video.id, 'good');
+                                  }}
+                                  disabled={feedbackSubmitting[video.id]}
+                                  style={{
+                                    background: feedback[video.id] === 'good' ? '#10b981' : '#1f2937',
+                                    border: '1px solid ' + (feedback[video.id] === 'good' ? '#10b981' : '#374151'),
+                                    color: feedback[video.id] === 'good' ? 'white' : '#9ca3af',
+                                    padding: '4px 8px',
+                                    borderRadius: 4,
+                                    cursor: feedbackSubmitting[video.id] ? 'wait' : 'pointer',
+                                    fontSize: 14,
+                                    lineHeight: 1,
+                                    transition: 'all 0.2s ease',
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    if (feedback[video.id] !== 'good') {
+                                      e.currentTarget.style.background = '#10b981';
+                                      e.currentTarget.style.borderColor = '#10b981';
+                                      e.currentTarget.style.color = 'white';
+                                    }
+                                  }}
+                                  onMouseLeave={(e) => {
+                                    if (feedback[video.id] !== 'good') {
+                                      e.currentTarget.style.background = '#1f2937';
+                                      e.currentTarget.style.borderColor = '#374151';
+                                      e.currentTarget.style.color = '#9ca3af';
+                                    }
+                                  }}
+                                  title="Good retrieve"
+                                >
+                                  👍
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleFeedback(video.id, 'bad');
+                                  }}
+                                  disabled={feedbackSubmitting[video.id]}
+                                  style={{
+                                    background: feedback[video.id] === 'bad' ? '#ef4444' : '#1f2937',
+                                    border: '1px solid ' + (feedback[video.id] === 'bad' ? '#ef4444' : '#374151'),
+                                    color: feedback[video.id] === 'bad' ? 'white' : '#9ca3af',
+                                    padding: '4px 8px',
+                                    borderRadius: 4,
+                                    cursor: feedbackSubmitting[video.id] ? 'wait' : 'pointer',
+                                    fontSize: 14,
+                                    lineHeight: 1,
+                                    transition: 'all 0.2s ease',
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    if (feedback[video.id] !== 'bad') {
+                                      e.currentTarget.style.background = '#ef4444';
+                                      e.currentTarget.style.borderColor = '#ef4444';
+                                      e.currentTarget.style.color = 'white';
+                                    }
+                                  }}
+                                  onMouseLeave={(e) => {
+                                    if (feedback[video.id] !== 'bad') {
+                                      e.currentTarget.style.background = '#1f2937';
+                                      e.currentTarget.style.borderColor = '#374151';
+                                      e.currentTarget.style.color = '#9ca3af';
+                                    }
+                                  }}
+                                  title="Bad retrieve"
+                                >
+                                  👎
+                                </button>
+                              </div>
+
                               <div style={{
                                 display: 'flex',
                                 justifyContent: 'space-between',

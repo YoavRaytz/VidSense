@@ -33,8 +33,18 @@ class Collection(Base):
     __tablename__ = 'collections'
     id = Column(String, primary_key=True)
     query = Column(Text, nullable=False)  # Original search query
+    query_embedding = Column(Vector(384))  # Query embedding for similarity search
     ai_answer = Column(Text, nullable=True)  # AI-generated answer
     video_ids = Column(JSONB, default=list)  # List of relevant video IDs
     metadata_json = Column(JSONB, default=dict)  # Additional metadata (scores, etc.)
+    created_at = Column(DateTime, server_default=func.now())
+
+class RetrievalFeedback(Base):
+    __tablename__ = 'retrieval_feedback'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    query = Column(Text, nullable=False)  # The search query
+    query_embedding = Column(Vector(384))  # Query embedding for similarity matching
+    video_id = Column(String, nullable=False)  # The source video that was retrieved
+    feedback = Column(String, nullable=False)  # 'good' or 'bad'
     created_at = Column(DateTime, server_default=func.now())
 

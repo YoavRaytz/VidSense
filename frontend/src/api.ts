@@ -257,3 +257,60 @@ export async function deleteCollection(collectionId: string) {
     method: 'DELETE',
   });
 }
+
+// =============================================================================
+// Retrieval Feedback endpoints
+// =============================================================================
+
+export interface SimilarQuery {
+  query: string;
+  similarity: number;
+  good_video_ids: string[];
+  bad_video_ids: string[];
+}
+
+export interface SimilarQueriesResponse {
+  query: string;
+  similar_queries: SimilarQuery[];
+}
+
+export async function saveRetrievalFeedback(query: string, videoId: string, feedback: 'good' | 'bad') {
+  return jsonFetch<{ status: string; message: string }>(`${API_BASE}/search/feedback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      query,
+      video_id: videoId,
+      feedback,
+    }),
+  });
+}
+
+export interface VideoFeedback {
+  video_id: string;
+  feedback: 'good' | 'bad';
+}
+
+export interface GetFeedbackResponse {
+  query: string;
+  feedback: VideoFeedback[];
+}
+
+export async function getRetrievalFeedback(query: string, videoIds: string[]) {
+  return jsonFetch<GetFeedbackResponse>(`${API_BASE}/search/feedback/get`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      query,
+      video_ids: videoIds,
+    }),
+  });
+}
+
+export async function findSimilarQueries(query: string, k: number = 10, k_ann: number = 50) {
+  return jsonFetch<SimilarQueriesResponse>(`${API_BASE}/search/similar-queries`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, k, k_ann }),
+  });
+}

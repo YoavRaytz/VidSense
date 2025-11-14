@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from .db import get_db
 from .embeddings import embed_text, combine_text_for_embedding
 from .reranker import rerank
-from .models import Video, Transcript
+from .models import Video, Transcript, RetrievalFeedback
 from .transcribe.gemini_client import GeminiTranscriber
 
 router = APIRouter(prefix="/search", tags=["search"])
@@ -231,12 +231,11 @@ def rag_answer(payload: RAGRequest, db: Session = Depends(get_db)):
     """
     Retrieval-Augmented Generation: Answer questions using video transcripts.
     
-    Process:
-    1. Stage 1+2: Retrieve k_ann candidates and rerank with cross-encoder
-    2. Select top k_final sources
-    3. Build context with source citations
-    4. Generate answer using Gemini with citations [1], [2], etc.
-    5. Return answer + sources
+    Enhanced with retrieval feedback:
+    1. Find similar past queries
+    2. Include 'good' sources from similar queries in context
+    3. Exclude 'bad' sources and already-retrieved sources from search
+    4. Generate answer with Gemini using combined sources
     """
     print(f"[rag] ========== NEW RAG REQUEST ==========")
     print(f"[rag] Query: '{payload.query}'")
@@ -245,21 +244,71 @@ def rag_answer(payload: RAGRequest, db: Session = Depends(get_db)):
     if not payload.query.strip():
         raise HTTPException(400, "Query cannot be empty")
     
-    # Step 1+2: Retrieve and rerank using search endpoint
-    search_req = SearchRequest(query=payload.query, k=payload.k_final, k_ann=payload.k_ann)
+    # Step 0: Find similar past queries and get their feedback
+    print(f"[rag] Step 0: Finding similar past queries...")
+    similar_queries_result = find_similar_queries(
+        SearchRequest(query=payload.query, k=payload.k_final, k_ann=payload.k_ann),
+        db
+    )
+    
+    # Collect good and bad video IDs from similar queries
+    good_video_ids_from_past = set()
+    bad_video_ids_from_past = set()
+    
+    for sim_query in similar_queries_result.similar_queries:
+        print(f"[rag] Similar query found: '{sim_query.query}' (similarity={sim_query.similarity:.4f})")
+        print(f"[rag]   Good sources: {len(sim_query.good_video_ids)}, Bad sources: {len(sim_query.bad_video_ids)}")
+        good_video_ids_from_past.update(sim_query.good_video_ids)
+        bad_video_ids_from_past.update(sim_query.bad_video_ids)
+    
+    exclude_video_ids = good_video_ids_from_past | bad_video_ids_from_past
+    print(f"[rag] Excluding {len(exclude_video_ids)} already-retrieved videos from search")
+    print(f"[rag]   {len(good_video_ids_from_past)} good sources to include in context")
+    print(f"[rag]   {len(bad_video_ids_from_past)} bad sources to exclude")
+    
+    # Step 1+2: Retrieve and rerank using search endpoint (with exclusions)
+    search_req = SearchRequest(query=payload.query, k=payload.k_final * 2, k_ann=payload.k_ann)
     search_result = search_videos(search_req, db)
     
-    if not search_result.hits:
-        print(f"[rag] No results found")
+    # Filter out excluded videos from new search results
+    filtered_hits = [hit for hit in search_result.hits if hit.video_id not in exclude_video_ids]
+    print(f"[rag] Filtered search results: {len(filtered_hits)} results (from {len(search_result.hits)} original)")
+    
+    # Step 2: Fetch good sources from similar queries
+    good_sources_from_past = []
+    if good_video_ids_from_past:
+        print(f"[rag] Fetching {len(good_video_ids_from_past)} good sources from past queries...")
+        for video_id in good_video_ids_from_past:
+            video = db.get(Video, video_id)
+            transcript = db.get(Transcript, video_id)
+            if video is not None and transcript is not None:
+                transcript_text = getattr(transcript, 'text', '') or ''
+                snippet = transcript_text[:200] + "..." if len(transcript_text) > 200 else transcript_text
+                good_sources_from_past.append(SearchHit(
+                    video_id=getattr(video, 'id'),
+                    title=getattr(video, 'title', None),
+                    author=getattr(video, 'author', None),
+                    url=getattr(video, 'url'),
+                    score=1.0,  # High confidence from past feedback
+                    snippet=snippet,
+                    media_path=getattr(video, 'media_path', None),
+                    source=getattr(video, 'source', None),
+                    description=getattr(video, 'description', None)
+                ))
+    
+    # Combine: good sources from past + new filtered search results
+    all_hits = good_sources_from_past + filtered_hits
+    top_hits = all_hits[:payload.k_final]
+    
+    if not top_hits:
+        print(f"[rag] No results found after filtering")
         return RAGResponse(
             query=payload.query,
             answer="I couldn't find any relevant information in the video database to answer your question.",
             sources=[]
         )
     
-    # Step 2: Use the reranked results (already top k_final)
-    top_hits = search_result.hits
-    print(f"[rag] Using {len(top_hits)} sources for answer generation")
+    print(f"[rag] Using {len(top_hits)} sources for answer generation ({len(good_sources_from_past)} from past, {len(filtered_hits[:payload.k_final-len(good_sources_from_past)])} new)")
     
     # Step 3: Build context with numbered sources
     context_parts = []
@@ -438,3 +487,187 @@ def _rerank_results(query: str, hits: List[SearchHit], max_results: int = 10) ->
     scored_hits.sort(key=lambda x: x[0], reverse=True)
     
     return [hit for _, hit in scored_hits[:max_results]]
+
+
+# ========== Retrieval Feedback Endpoints ==========
+
+class FeedbackRequest(BaseModel):
+    query: str = Field(..., description="The search query")
+    video_id: str = Field(..., description="The video ID that was retrieved")
+    feedback: str = Field(..., description="'good' or 'bad'")
+
+
+class SimilarQuery(BaseModel):
+    query: str
+    similarity: float
+    good_video_ids: List[str]
+    bad_video_ids: List[str]
+
+
+class SimilarQueriesResponse(BaseModel):
+    query: str
+    similar_queries: List[SimilarQuery]
+
+
+@router.post("/feedback", status_code=201)
+def save_retrieval_feedback(payload: FeedbackRequest, db: Session = Depends(get_db)):
+    """
+    Save feedback (good/bad) for a retrieved source.
+    This helps the system learn which sources are relevant for specific queries.
+    """
+    print(f"[feedback] Saving feedback: query='{payload.query}', video_id={payload.video_id}, feedback={payload.feedback}")
+    
+    if payload.feedback not in ['good', 'bad']:
+        raise HTTPException(400, "Feedback must be 'good' or 'bad'")
+    
+    # Generate query embedding
+    try:
+        query_embedding = embed_text(payload.query)
+    except Exception as e:
+        print(f"[feedback][ERROR] Failed to generate query embedding: {e}")
+        raise HTTPException(500, f"Failed to generate query embedding: {e}")
+    
+    # Save feedback
+    try:
+        feedback = RetrievalFeedback(
+            query=payload.query,
+            query_embedding=query_embedding,
+            video_id=payload.video_id,
+            feedback=payload.feedback
+        )
+        db.add(feedback)
+        db.commit()
+        print(f"[feedback] Feedback saved successfully")
+        return {"status": "success", "message": "Feedback saved"}
+    except Exception as e:
+        db.rollback()
+        print(f"[feedback][ERROR] Failed to save feedback: {e}")
+        raise HTTPException(500, f"Failed to save feedback: {e}")
+
+
+class GetFeedbackRequest(BaseModel):
+    query: str = Field(..., description="The search query")
+    video_ids: List[str] = Field(..., description="List of video IDs to get feedback for")
+
+
+class VideoFeedback(BaseModel):
+    video_id: str
+    feedback: str  # 'good' or 'bad'
+
+
+class GetFeedbackResponse(BaseModel):
+    query: str
+    feedback: List[VideoFeedback]
+
+
+@router.post("/feedback/get", response_model=GetFeedbackResponse)
+def get_retrieval_feedback(payload: GetFeedbackRequest, db: Session = Depends(get_db)):
+    """
+    Get existing feedback for specific videos and query.
+    Returns list of video IDs with their feedback status.
+    """
+    print(f"[get-feedback] Getting feedback for query='{payload.query}', videos={len(payload.video_ids)}")
+    
+    if not payload.video_ids:
+        return GetFeedbackResponse(query=payload.query, feedback=[])
+    
+    try:
+        # Query feedback for this query and these video IDs
+        sql = sql_text("""
+            SELECT DISTINCT ON (video_id) video_id, feedback
+            FROM retrieval_feedback
+            WHERE query = :query
+                AND video_id = ANY(:video_ids)
+            ORDER BY video_id, created_at DESC
+        """)
+        
+        result = db.execute(
+            sql,
+            {"query": payload.query, "video_ids": payload.video_ids}
+        ).fetchall()
+        
+        feedback_list = [
+            VideoFeedback(video_id=video_id, feedback=feedback)
+            for video_id, feedback in result
+        ]
+        
+        print(f"[get-feedback] Found {len(feedback_list)} feedback records")
+        return GetFeedbackResponse(query=payload.query, feedback=feedback_list)
+        
+    except Exception as e:
+        print(f"[get-feedback][ERROR] Failed to get feedback: {e}")
+        raise HTTPException(500, f"Failed to get feedback: {e}")
+
+
+@router.post("/similar-queries", response_model=SimilarQueriesResponse)
+def find_similar_queries(payload: SearchRequest, db: Session = Depends(get_db)):
+    """
+    Find similar past queries based on semantic similarity.
+    Returns queries with their good/bad source feedback.
+    """
+    print(f"[similar-queries] Finding similar queries for: '{payload.query}'")
+    
+    if not payload.query.strip():
+        return SimilarQueriesResponse(query=payload.query, similar_queries=[])
+    
+    # Generate query embedding
+    try:
+        query_embedding = embed_text(payload.query)
+    except Exception as e:
+        print(f"[similar-queries][ERROR] Failed to generate query embedding: {e}")
+        raise HTTPException(500, f"Failed to generate query embedding: {e}")
+    
+    # Find similar queries (similarity > 0.85 threshold)
+    sql = sql_text("""
+        SELECT DISTINCT
+            query,
+            1 - (query_embedding <=> :query_vec) AS similarity
+        FROM retrieval_feedback
+        WHERE query_embedding IS NOT NULL
+            AND 1 - (query_embedding <=> :query_vec) > 0.85
+        ORDER BY similarity DESC
+        LIMIT 5
+    """)
+    
+    try:
+        result = db.execute(
+            sql,
+            {"query_vec": json.dumps(query_embedding)}
+        ).fetchall()
+    except Exception as e:
+        print(f"[similar-queries][ERROR] Database query failed: {e}")
+        raise HTTPException(500, f"Failed to find similar queries: {e}")
+    
+    print(f"[similar-queries] Found {len(result)} similar queries")
+    
+    similar_queries = []
+    for row in result:
+        query_text, similarity = row
+        
+        # Skip if it's the exact same query
+        if query_text.strip().lower() == payload.query.strip().lower():
+            continue
+        
+        # Get good and bad sources for this query
+        feedback_sql = sql_text("""
+            SELECT video_id, feedback
+            FROM retrieval_feedback
+            WHERE query = :query
+        """)
+        feedback_result = db.execute(feedback_sql, {"query": query_text}).fetchall()
+        
+        good_video_ids = [vid for vid, fb in feedback_result if fb == 'good']
+        bad_video_ids = [vid for vid, fb in feedback_result if fb == 'bad']
+        
+        similar_queries.append(SimilarQuery(
+            query=query_text,
+            similarity=float(similarity),
+            good_video_ids=good_video_ids,
+            bad_video_ids=bad_video_ids
+        ))
+    
+    return SimilarQueriesResponse(
+        query=payload.query,
+        similar_queries=similar_queries
+    )
+
