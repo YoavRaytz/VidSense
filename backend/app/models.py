@@ -33,6 +33,7 @@ class Collection(Base):
     __tablename__ = 'collections'
     id = Column(String, primary_key=True)
     query = Column(Text, nullable=False)  # Original search query
+    query_embedding = Column(Vector(384))  # Query embedding for similarity search
     ai_answer = Column(Text, nullable=True)  # AI-generated answer
     video_ids = Column(JSONB, default=list)  # List of relevant video IDs
     metadata_json = Column(JSONB, default=dict)  # Additional metadata (scores, etc.)

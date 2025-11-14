@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { searchVideos, ragAnswer, getStreamUrl, getTranscript, getVideoMeta, listTranscripts, saveCollection, saveRetrievalFeedback, getRetrievalFeedback, type SearchHit, type RAGResponse } from '../api';
+import { searchVideos, ragAnswer, getStreamUrl, getTranscript, getVideoMeta, listTranscripts, saveCollection, saveRetrievalFeedback, getRetrievalFeedback, findSimilarCollections, type SearchHit, type RAGResponse, type SimilarCollectionResult } from '../api';
 import VideoPlayer from '../components/VideoPlayer';
 import TranscriptViewer from '../components/TranscriptViewer';
 import VideoMetadata from '../components/VideoMetadata';
@@ -14,10 +14,16 @@ export default function SearchPage() {
   const [searching, setSearching] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [generateAnswer, setGenerateAnswer] = useState(true); // Checkbox state - default true
   
   // Search results
   const [searchResults, setSearchResults] = useState<SearchHit[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
+  
+  // Similar collections
+  const [similarCollections, setSimilarCollections] = useState<SimilarCollectionResult[]>([]);
+  const [expandedCollectionIds, setExpandedCollectionIds] = useState<Set<string>>(new Set());
+  const [similarCollectionsExpanded, setSimilarCollectionsExpanded] = useState(true); // Collapse entire section
   
   // RAG answer
   const [ragResponse, setRagResponse] = useState<RAGResponse | null>(null);
@@ -62,10 +68,57 @@ export default function SearchPage() {
     setSearchQuery(query);
     setRagResponse(null);
     setSelectedVideo(null);
+    setSimilarCollections([]);
     
     try {
-      const result = await searchVideos(query, 10);
-      setSearchResults(result.hits);
+      // Find similar collections
+      const collectionsResult = await findSimilarCollections(query, 10, 50);
+      console.log(`Found ${collectionsResult.collections.length} similar collections`);
+      setSimilarCollections(collectionsResult.collections);
+      
+      // Auto-expand the first (most similar) collection if found
+      if (collectionsResult.collections.length > 0) {
+        setExpandedCollectionIds(new Set([collectionsResult.collections[0].id]));
+      }
+      
+      // If generateAnswer is checked AND no similar collections found, generate new answer automatically
+      if (generateAnswer && collectionsResult.collections.length === 0) {
+        setGenerating(true);
+        try {
+          const result = await ragAnswer(query, 20, 5);
+          setRagResponse(result);
+          
+          // Load existing feedback for these sources
+          if (result.sources && result.sources.length > 0) {
+            const videoIds = result.sources.map(s => s.video_id);
+            try {
+              const feedbackResponse = await getRetrievalFeedback(query, videoIds);
+              
+              // Convert feedback array to object for easy lookup
+              const feedbackMap: {[videoId: string]: 'good' | 'bad' | null} = {};
+              feedbackResponse.feedback.forEach(fb => {
+                feedbackMap[fb.video_id] = fb.feedback;
+              });
+              
+              setFeedback(feedbackMap);
+              console.log(`[search] Loaded ${feedbackResponse.feedback.length} feedback records`);
+            } catch (error) {
+              console.error('[search] Failed to load feedback:', error);
+            }
+          }
+        } catch (e) {
+          console.error('RAG generation failed:', e);
+          alert(`Answer generation failed: ${e}`);
+        } finally {
+          setGenerating(false);
+        }
+      }
+      
+      // Also get search results if we don't have collections
+      if (collectionsResult.collections.length === 0) {
+        const searchResult = await searchVideos(query, 10);
+        setSearchResults(searchResult.hits);
+      }
     } catch (e) {
       console.error('Search failed:', e);
       alert(`Search failed: ${e}`);
@@ -74,7 +127,7 @@ export default function SearchPage() {
     }
   }
 
-  async function handleGenerateAnswer() {
+  async function handleGenerateNewAnswer() {
     if (!query.trim()) return;
     
     setGenerating(true);
@@ -99,14 +152,7 @@ export default function SearchPage() {
           console.log(`[search] Loaded ${feedbackResponse.feedback.length} feedback records`);
         } catch (error) {
           console.error('[search] Failed to load feedback:', error);
-          // Continue without feedback - not a critical error
         }
-      }
-      
-      // Also run search if we haven't yet
-      if (!searchResults.length) {
-        const searchResult = await searchVideos(query, 10);
-        setSearchResults(searchResult.hits);
       }
     } catch (e) {
       console.error('RAG generation failed:', e);
@@ -114,6 +160,18 @@ export default function SearchPage() {
     } finally {
       setGenerating(false);
     }
+  }
+
+  function toggleCollectionExpand(collectionId: string) {
+    setExpandedCollectionIds(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(collectionId)) {
+        newSet.delete(collectionId);
+      } else {
+        newSet.add(collectionId);
+      }
+      return newSet;
+    });
   }
 
   async function handleSaveCollection() {
@@ -383,21 +441,26 @@ export default function SearchPage() {
           />
         </div>
         
-        <div className="row" style={{ gap: 12 }}>
-          <button
-            className="btn btn-primary"
-            onClick={handleSearch}
-            disabled={!query.trim() || searching || generating}
-          >
-            {searching ? 'Searching...' : '🔍 Search'}
-          </button>
-          <button
-            className="btn btn-primary"
-            onClick={handleGenerateAnswer}
-            disabled={!query.trim() || searching || generating}
-          >
-            {generating ? 'Generating...' : '✨ Generate AI Answer'}
-          </button>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+            <button
+              className="btn btn-primary"
+              onClick={handleSearch}
+              disabled={!query.trim() || searching || generating}
+            >
+              {searching || generating ? '⏳ Processing...' : '🔍 Search'}
+            </button>
+            
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}>
+              <input
+                type="checkbox"
+                checked={generateAnswer}
+                onChange={(e) => setGenerateAnswer(e.target.checked)}
+                style={{ cursor: 'pointer', width: 18, height: 18 }}
+              />
+              <span style={{ fontSize: 14, color: '#d1d5db' }}>✨ Generate AI Answer</span>
+            </label>
+          </div>
         </div>
       </div>
 
@@ -447,6 +510,305 @@ export default function SearchPage() {
           <p className="muted" style={{ fontSize: 12, margin: 0 }}>
             💡 Click on citations [1], [2], etc. to jump to source videos below
           </p>
+        </div>
+      )}
+
+      {/* Similar Collections Found */}
+      {similarCollections.length > 0 && (
+        <div className="card" style={{ background: '#1e293b', border: '1px solid #3b82f6' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
+            <div style={{ flex: 1 }}>
+              <h3 className="section-title" style={{ color: '#60a5fa', marginBottom: 8 }}>
+                💡 Similar Past Searches Found
+              </h3>
+              <p className="muted" style={{ fontSize: 14 }}>
+                The system detected {similarCollections.length} previous search{similarCollections.length > 1 ? 'es' : ''} that might be what you're looking for
+              </p>
+            </div>
+            
+            <button
+              onClick={() => setSimilarCollectionsExpanded(!similarCollectionsExpanded)}
+              style={{
+                padding: '8px 16px',
+                background: '#2563eb',
+                border: 'none',
+                borderRadius: 6,
+                color: 'white',
+                cursor: 'pointer',
+                fontSize: 14,
+                fontWeight: 500,
+                whiteSpace: 'nowrap',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = '#1d4ed8';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = '#2563eb';
+              }}
+            >
+              {similarCollectionsExpanded ? '▲ Collapse All' : '▼ Expand All'}
+            </button>
+          </div>
+
+          {similarCollectionsExpanded && (
+            <>
+              {!ragResponse && (
+                <button
+                  className="btn btn-primary"
+                  onClick={handleGenerateNewAnswer}
+                  disabled={generating}
+                  style={{
+                    marginBottom: 16,
+                    background: '#2563eb',
+                    fontSize: 14,
+                  }}
+                  onMouseEnter={(e) => {
+                    if (!generating) e.currentTarget.style.background = '#1d4ed8';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = '#2563eb';
+                  }}
+                >
+                  {generating ? '⏳ Generating...' : '✨ Generate New Answer Anyway'}
+                </button>
+              )}
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            {similarCollections.map((collection, idx) => (
+              <div
+                key={collection.id}
+                style={{
+                  background: '#0f172a',
+                  border: '1px solid #334155',
+                  borderRadius: 8,
+                  padding: 16,
+                  transition: 'border-color 0.2s',
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.borderColor = '#3b82f6';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.borderColor = '#334155';
+                }}
+              >
+                {/* Collection Header */}
+                <div style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'flex-start',
+                  marginBottom: 12,
+                }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                      <span style={{
+                        background: '#2563eb',
+                        color: 'white',
+                        padding: '4px 8px',
+                        borderRadius: 4,
+                        fontSize: 12,
+                        fontWeight: 600,
+                      }}>
+                        {(collection.similarity * 100).toFixed(0)}% match
+                      </span>
+                      <h4 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>
+                        {collection.query}
+                      </h4>
+                    </div>
+                    <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+                      Saved {new Date(collection.created_at).toLocaleDateString()}
+                      {' • '}
+                      {collection.videos.length} source{collection.videos.length !== 1 ? 's' : ''}
+                    </p>
+                  </div>
+
+                  <button
+                    onClick={() => toggleCollectionExpand(collection.id)}
+                    style={{
+                      padding: '6px 12px',
+                      background: '#2563eb',
+                      border: 'none',
+                      borderRadius: 6,
+                      color: 'white',
+                      cursor: 'pointer',
+                      fontSize: 13,
+                      fontWeight: 500,
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = '#1d4ed8';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = '#2563eb';
+                    }}
+                  >
+                    {expandedCollectionIds.has(collection.id) ? '▲ Collapse' : '▼ Expand'}
+                  </button>
+                </div>
+
+                {/* Expanded Content */}
+                {expandedCollectionIds.has(collection.id) && (
+                  <>
+                    {/* AI Answer */}
+                    {collection.ai_answer && (
+                      <div style={{
+                        background: '#1e293b',
+                        border: '1px solid #334155',
+                        borderRadius: 8,
+                        padding: 16,
+                        marginBottom: 16,
+                      }}>
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          marginBottom: 12,
+                        }}>
+                          <span style={{ fontSize: 16 }}>🤖</span>
+                          <h4 style={{
+                            fontSize: 14,
+                            fontWeight: 600,
+                            margin: 0,
+                            color: '#60a5fa',
+                          }}>
+                            AI Answer
+                          </h4>
+                        </div>
+                        <div style={{ fontSize: 14, lineHeight: 1.6 }}>
+                          <ReactMarkdown>{collection.ai_answer}</ReactMarkdown>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Sources */}
+                    {collection.videos.length > 0 && (
+                      <>
+                        <h4 style={{
+                          fontSize: 14,
+                          fontWeight: 600,
+                          marginBottom: 12,
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                        }}>
+                          <span>📚</span>
+                          <span>Sources ({collection.videos.length})</span>
+                        </h4>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                          {collection.videos.map((video, vidIdx) => (
+                            <div
+                              key={video.id}
+                              onClick={() => {
+                                // Handle video click - convert to SearchHit format
+                                const hit: SearchHit = {
+                                  video_id: video.id,
+                                  title: video.title,
+                                  author: video.author,
+                                  url: video.url,
+                                  score: video.score || 0,
+                                  snippet: video.snippet || video.description || '',
+                                  media_path: null,
+                                  source: null,
+                                  description: video.description
+                                };
+                                handleVideoClick(hit);
+                              }}
+                              style={{
+                                padding: 16,
+                                background: '#1e293b',
+                                border: '1px solid #334155',
+                                borderRadius: 8,
+                                cursor: 'pointer',
+                                transition: 'all 0.2s ease',
+                              }}
+                              onMouseEnter={(e) => {
+                                e.currentTarget.style.borderColor = '#3b82f6';
+                                e.currentTarget.style.background = '#1f2937';
+                              }}
+                              onMouseLeave={(e) => {
+                                e.currentTarget.style.borderColor = '#334155';
+                                e.currentTarget.style.background = '#1e293b';
+                              }}
+                            >
+                              <div style={{
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'flex-start',
+                                marginBottom: 8,
+                              }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1 }}>
+                                  <span style={{
+                                    background: '#2563eb',
+                                    color: 'white',
+                                    padding: '4px 8px',
+                                    borderRadius: 4,
+                                    fontSize: 12,
+                                    fontWeight: 600,
+                                  }}>
+                                    [{vidIdx + 1}]
+                                  </span>
+                                  <h4 style={{ margin: 0, fontSize: 16 }}>
+                                    {video.title || 'Untitled Video'}
+                                  </h4>
+                                </div>
+                                {video.score && (
+                                  <span style={{
+                                    color: '#10b981',
+                                    fontSize: 13,
+                                    fontWeight: 600,
+                                  }}>
+                                    {(video.score * 100).toFixed(1)}% match
+                                  </span>
+                                )}
+                              </div>
+
+                              {video.author && (
+                                <p className="muted" style={{ margin: '4px 0 8px 0', fontSize: 13 }}>
+                                  by {video.author}
+                                </p>
+                              )}
+
+                              {(video.description || video.snippet) && (
+                                <p style={{
+                                  fontSize: 14,
+                                  lineHeight: 1.6,
+                                  color: '#d1d5db',
+                                  margin: '8px 0 0 0',
+                                }}>
+                                  {(video.description || video.snippet)!.length > 200
+                                    ? (video.description || video.snippet)!.slice(0, 200) + '...'
+                                    : (video.description || video.snippet)}
+                                </p>
+                              )}
+
+                              {video.hashtags && video.hashtags.length > 0 && (
+                                <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                                  {video.hashtags.map((tag: string) => (
+                                    <span
+                                      key={tag}
+                                      style={{
+                                        background: '#334155',
+                                        color: '#60a5fa',
+                                        padding: '2px 8px',
+                                        borderRadius: 4,
+                                        fontSize: 12,
+                                      }}
+                                    >
+                                      {tag}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+            </>
+          )}
         </div>
       )}
 

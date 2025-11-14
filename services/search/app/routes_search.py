@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from .db import get_db
 from .embeddings import embed_text, combine_text_for_embedding
 from .reranker import rerank
-from .models import Video, Transcript, RetrievalFeedback
+from .models import Video, Transcript, RetrievalFeedback, Collection
 from .transcribe.gemini_client import GeminiTranscriber
 
 router = APIRouter(prefix="/search", tags=["search"])
@@ -670,4 +670,134 @@ def find_similar_queries(payload: SearchRequest, db: Session = Depends(get_db)):
         query=payload.query,
         similar_queries=similar_queries
     )
+
+
+# ========== Similar Collections Endpoint ==========
+
+class CollectionVideo(BaseModel):
+    id: str
+    title: str | None
+    author: str | None
+    url: str
+    score: float | None = None
+    snippet: str | None = None
+    description: str | None = None
+    clip_count: int | None = None
+    hashtags: List[str] | None = None
+
+
+class SimilarCollectionResult(BaseModel):
+    id: str
+    query: str
+    similarity: float
+    ai_answer: str | None
+    videos: List[CollectionVideo]
+    created_at: str
+    metadata_json: dict = {}
+
+
+class SimilarCollectionsResponse(BaseModel):
+    query: str
+    collections: List[SimilarCollectionResult]
+
+
+@router.post("/similar-collections", response_model=SimilarCollectionsResponse)
+def find_similar_collections(payload: SearchRequest, db: Session = Depends(get_db)):
+    """
+    Find similar past collections based on semantic similarity of queries.
+    Returns full collection details including AI answers and source videos.
+    Threshold: 70% similarity (0.50)
+    """
+    print(f"[similar-collections] Finding similar collections for: '{payload.query}'")
+    
+    if not payload.query.strip():
+        return SimilarCollectionsResponse(query=payload.query, collections=[])
+    
+    # Generate query embedding
+    try:
+        query_embedding = embed_text(payload.query)
+    except Exception as e:
+        print(f"[similar-collections][ERROR] Failed to generate query embedding: {e}")
+        raise HTTPException(500, f"Failed to generate query embedding: {e}")
+    
+    # Find similar collections (similarity > 0.50 threshold)
+    sql = sql_text("""
+        SELECT 
+            id,
+            query,
+            ai_answer,
+            video_ids,
+            metadata_json,
+            created_at,
+            1 - (query_embedding <=> :query_vec) AS similarity
+        FROM collections
+        WHERE query_embedding IS NOT NULL
+            AND 1 - (query_embedding <=> :query_vec) > 0.50
+        ORDER BY similarity DESC
+        LIMIT 10
+    """)
+    
+    try:
+        result = db.execute(
+            sql,
+            {"query_vec": json.dumps(query_embedding)}
+        ).fetchall()
+    except Exception as e:
+        print(f"[similar-collections][ERROR] Database query failed: {e}")
+        raise HTTPException(500, f"Failed to find similar collections: {e}")
+    
+    print(f"[similar-collections] Found {len(result)} similar collections")
+    
+    similar_collections = []
+    for row in result:
+        collection_id, query_text, ai_answer, video_ids, metadata_json, created_at, similarity = row
+        
+        # Skip if it's the exact same query
+        if query_text.strip().lower() == payload.query.strip().lower():
+            continue
+        
+        # Fetch video details for this collection
+        videos_data = []
+        if video_ids:
+            videos = db.query(Video).filter(Video.id.in_(video_ids)).all()
+            
+            # Create a mapping to preserve order and include scores from metadata
+            video_map = {v.id: v for v in videos}
+            
+            # Get scores from metadata if available
+            scores_map = {}
+            if metadata_json and 'source_scores' in metadata_json:
+                scores_map = metadata_json['source_scores']
+            
+            for vid_id in video_ids:
+                if vid_id in video_map:
+                    v = video_map[vid_id]
+                    videos_data.append(CollectionVideo(
+                        id=v.id,
+                        title=v.title,
+                        author=v.author,
+                        url=v.url,
+                        score=scores_map.get(vid_id),
+                        snippet=None,  # We don't store snippets in collections
+                        description=v.description,
+                        clip_count=v.clip_count,
+                        hashtags=v.hashtags if hasattr(v, 'hashtags') else None
+                    ))
+        
+        similar_collections.append(SimilarCollectionResult(
+            id=collection_id,
+            query=query_text,
+            similarity=float(similarity),
+            ai_answer=ai_answer,
+            videos=videos_data,
+            created_at=created_at.isoformat() if created_at else "",
+            metadata_json=metadata_json or {}
+        ))
+    
+    print(f"[similar-collections] Returning {len(similar_collections)} collections")
+    return SimilarCollectionsResponse(
+        query=payload.query,
+        collections=similar_collections
+    )
+
 

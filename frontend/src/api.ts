@@ -314,3 +314,39 @@ export async function findSimilarQueries(query: string, k: number = 10, k_ann: n
     body: JSON.stringify({ query, k, k_ann }),
   });
 }
+
+export interface CollectionVideo {
+  id: string;
+  title: string | null;
+  author: string | null;
+  url: string;
+  score: number | null;
+  snippet: string | null;
+  description: string | null;
+  clip_count: number | null;
+  hashtags: string[] | null;
+}
+
+export interface SimilarCollectionResult {
+  id: string;
+  query: string;
+  similarity: number;
+  ai_answer: string | null;
+  videos: CollectionVideo[];
+  created_at: string;
+  metadata_json: Record<string, any>;
+}
+
+export interface SimilarCollectionsResponse {
+  query: string;
+  collections: SimilarCollectionResult[];
+}
+
+export async function findSimilarCollections(query: string, k: number = 10, k_ann: number = 50) {
+  return jsonFetch<SimilarCollectionsResponse>(`${API_BASE}/search/similar-collections`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, k, k_ann }),
+  });
+}
+

@@ -6,6 +6,7 @@ from typing import List, Optional
 
 from .db import get_db
 from .models import Collection, Video
+from .embeddings import embed_text
 
 router = APIRouter(prefix="/collections", tags=["collections"])
 
@@ -47,9 +48,18 @@ def create_collection(payload: CollectionCreate, db: Session = Depends(get_db)):
     """Save a search result to collections"""
     collection_id = uuid4().hex
     
+    # Generate query embedding for semantic search
+    try:
+        query_embedding = embed_text(payload.query)
+        print(f"[collections] Generated embedding for query: '{payload.query}'")
+    except Exception as e:
+        print(f"[collections][WARNING] Failed to generate query embedding: {e}")
+        query_embedding = None
+    
     collection = Collection(
         id=collection_id,
         query=payload.query,
+        query_embedding=query_embedding,
         ai_answer=payload.ai_answer,
         video_ids=payload.video_ids,
         metadata_json=payload.metadata_json,
