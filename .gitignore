@@ -8,6 +8,7 @@
 .DS_Store
 Thumbs.db
 
+archive/
 # =========================================
 # 🐍 Python / FastAPI backend
 # =========================================
@@ -114,12 +115,6 @@ uploads/
 # =========================================
 # 🧪 Debug/Test Scripts (don't commit)
 # =========================================
-backend/check_db.py
-backend/clean_old_videos.py
-backend/debug_metadata.py
-backend/update_metadata.py
-backend/migrate_embeddings.py
-test_extractors.py
 
 # =========================================
 # 📝 Optional Documentation (choose what to keep)
