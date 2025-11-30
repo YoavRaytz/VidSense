@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { getCollections, deleteCollection, getCollection, Collection, CollectionWithVideos, getStreamUrl, getTranscript, listTranscripts, saveRetrievalFeedback, getRetrievalFeedback, type VideoSummary } from '../api';
+import { getCollections, deleteCollection, getCollection, Collection, CollectionWithVideos, getStreamUrl, getTranscript, listTranscripts, saveRetrievalFeedback, deleteRetrievalFeedback, getRetrievalFeedback, type VideoSummary } from '../api';
 import ReactMarkdown from 'react-markdown';
 import VideoPlayer from '../components/VideoPlayer';
 import TranscriptViewer from '../components/TranscriptViewer';
@@ -103,15 +103,47 @@ export default function CollectionsPage() {
   const handleFeedback = async (videoId: string, feedbackType: 'good' | 'bad') => {
     if (!expandedCollection) return;
     
-    // Optimistic update
+    const currentFeedback = feedback[videoId];
+    
+    console.log(`[handleFeedback-CollectionsPage] CALLED`);
+    console.log(`  videoId: ${videoId}`);
+    console.log(`  feedbackType: ${feedbackType}`);
+    console.log(`  currentFeedback: ${currentFeedback}`);
+    console.log(`  currentFeedback === feedbackType: ${currentFeedback === feedbackType}`);
+    
+    // Toggle behavior: if clicking the same feedback, unselect it (delete)
+    if (currentFeedback === feedbackType) {
+      console.log(`⚡ TOGGLING OFF: ${feedbackType} for video ${videoId}`);
+      setFeedbackSubmitting(prev => ({ ...prev, [videoId]: true }));
+      
+      try {
+        await deleteRetrievalFeedback(expandedCollection.query, videoId);
+        console.log(`✅ Feedback deleted from DB`);
+        setFeedback(prev => {
+          const newState = { ...prev };
+          delete newState[videoId];
+          console.log(`✅ State updated - key ${videoId} deleted`);
+          return newState;
+        });
+      } catch (error) {
+        console.error('❌ Failed to delete feedback:', error);
+        alert('Failed to delete feedback. Please try again.');
+      } finally {
+        setFeedbackSubmitting(prev => ({ ...prev, [videoId]: false }));
+      }
+      return;
+    }
+    
+    // Otherwise, save or switch to new feedback type
+    console.log(`⚡ SAVING/SWITCHING: ${feedbackType} for video ${videoId}`);
     setFeedback(prev => ({ ...prev, [videoId]: feedbackType }));
     setFeedbackSubmitting(prev => ({ ...prev, [videoId]: true }));
     
     try {
       await saveRetrievalFeedback(expandedCollection.query, videoId, feedbackType);
-      console.log(`Feedback saved: ${feedbackType} for video ${videoId}`);
+      console.log(`✅ Feedback saved: ${feedbackType} for video ${videoId}`);
     } catch (error) {
-      console.error('Failed to save feedback:', error);
+      console.error('❌ Failed to save feedback:', error);
       // Revert on error
       setFeedback(prev => ({ ...prev, [videoId]: null }));
       alert('Failed to save feedback. Please try again.');

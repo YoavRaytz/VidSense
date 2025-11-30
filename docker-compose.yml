@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # ========================================
   # API Gateway (Nginx)
@@ -31,6 +29,7 @@ services:
     ports:
       - "8081:8081"
     environment:
+      # - DATABASE_URL=postgresql+psycopg://tips:tips123@postgres:5432/tipsdb
       - DATABASE_URL=postgresql+psycopg://tips:tips123@postgres:5432/tipsdb
       - REDIS_URL=redis://redis:6379/0
       - GEMINI_API_KEY=${GEMINI_API_KEY}
@@ -199,20 +198,21 @@ services:
   # ========================================
   # PostgreSQL (External - using existing)
   # ========================================
-  postgres:
-    image: pgvector/pgvector:pg15
-    container_name: vidsense-postgres
-    # Use your existing container ID
-    # If you want to use existing DB, comment out this service
-    # and update DATABASE_URL to point to your running container
-    external_links:
-      - 2f2f5ac5192e:postgres
-    networks:
-      - vidsense-network
+  # postgres:
+  #   image: postgres/postgres:pg15
+  #   container_name: vidsense-postgres
+  #   # Use your existing container ID
+  #   # If you want to use existing DB, comment out this service
+  #   # and update DATABASE_URL to point to your running container
+  #   external_links:
+  #     - 2f2f5ac5192e:postgres
+  #   networks:
+  #     - vidsense-network
 
 networks:
   vidsense-network:
-    driver: bridge
+    name: vidsense_vidsense-network
+    external: true
 
 volumes:
   vidsense-models:

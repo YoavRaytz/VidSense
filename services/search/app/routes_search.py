@@ -53,6 +53,7 @@ class RAGRequest(BaseModel):
     query: str = Field(..., description="Question to answer")
     k_ann: int = Field(default=20, ge=1, le=100, description="Number of candidates to retrieve")
     k_final: int = Field(default=5, ge=1, le=20, description="Number of sources to use in final answer")
+    similar_collection_ids: List[str] = Field(default=[], description="IDs of similar collections to pull feedback from")
 
 
 class RAGSource(BaseModel):
@@ -62,12 +63,22 @@ class RAGSource(BaseModel):
     url: str
     snippet: str
     score: float
+    source_type: str = Field(default="search", description="'search', 'collection', or 'feedback'")
+    source_reference: str | None = Field(default=None, description="Reference to collection query or feedback source")
+
+
+class ExcludedVideo(BaseModel):
+    video_id: str
+    title: str | None
+    reason: str = Field(description="'liked_in_collection', 'disliked_in_collection', or 'bad_feedback'")
+    source_reference: str | None = Field(default=None, description="Reference to collection or feedback source")
 
 
 class RAGResponse(BaseModel):
     query: str
     answer: str = Field(description="AI-generated answer with inline citations")
     sources: List[RAGSource] = Field(description="Source videos used to generate the answer")
+    excluded_videos: List[ExcludedVideo] = Field(default=[], description="Videos excluded from search (liked/disliked in collections)")
 
 
 # ========== Search Endpoint ==========
@@ -231,101 +242,246 @@ def rag_answer(payload: RAGRequest, db: Session = Depends(get_db)):
     """
     Retrieval-Augmented Generation: Answer questions using video transcripts.
     
-    Enhanced with retrieval feedback:
-    1. Find similar past queries
-    2. Include 'good' sources from similar queries in context
-    3. Exclude 'bad' sources and already-retrieved sources from search
-    4. Generate answer with Gemini using combined sources
+    Enhanced with collection feedback:
+    1. Pull liked videos from similar collections automatically
+    2. Exclude both liked and disliked videos from new searches (optimization)
+    3. Mark sources with their origin (search/collection/feedback)
+    4. Track excluded videos for transparency
+    5. Generate answer with Gemini using combined sources
     """
     print(f"[rag] ========== NEW RAG REQUEST ==========")
     print(f"[rag] Query: '{payload.query}'")
     print(f"[rag] k_ann={payload.k_ann}, k_final={payload.k_final}")
+    print(f"[rag] Similar collections: {len(payload.similar_collection_ids)}")
     
     if not payload.query.strip():
         raise HTTPException(400, "Query cannot be empty")
     
-    # Step 0: Find similar past queries and get their feedback
-    print(f"[rag] Step 0: Finding similar past queries...")
+    # Step 0: Embed query for feedback search
+    query_embedding = embed_text(payload.query)
+    
+    # Step 1: Process similar collections to get liked/disliked videos
+    liked_from_collections = {}  # video_id -> collection_query
+    disliked_from_collections = {}  # video_id -> collection_query
+    excluded_videos_list = []
+    
+    if payload.similar_collection_ids:
+        print(f"[rag] Step 1: Processing {len(payload.similar_collection_ids)} similar collections for feedback...")
+        
+        for collection_id in payload.similar_collection_ids:
+            collection = db.get(Collection, collection_id)
+            if not collection:
+                continue
+            
+            collection_query = collection.query
+            print(f"[rag]   Collection: '{collection_query}'")
+            
+            # Get all feedback for this collection's query
+            feedback_records = db.query(RetrievalFeedback).filter(
+                RetrievalFeedback.query == collection_query
+            ).all()
+            
+            for fb in feedback_records:
+                video_id = fb.video_id
+                feedback_type = fb.feedback
+                
+                if feedback_type == 'good':
+                    liked_from_collections[video_id] = collection_query
+                    print(f"[rag]     ✓ Liked: {video_id[:16]}...")
+                elif feedback_type == 'bad':
+                    disliked_from_collections[video_id] = collection_query
+                    print(f"[rag]     ✗ Disliked: {video_id[:16]}...")
+    
+    # Step 2: Also get feedback from similar queries (original logic)
+    print(f"[rag] Step 2: Finding similar past queries...")
     similar_queries_result = find_similar_queries(
         SearchRequest(query=payload.query, k=payload.k_final, k_ann=payload.k_ann),
         db
     )
     
-    # Collect good and bad video IDs from similar queries
-    good_video_ids_from_past = set()
-    bad_video_ids_from_past = set()
+    liked_from_queries = set()
+    disliked_from_queries = set()
     
     for sim_query in similar_queries_result.similar_queries:
-        print(f"[rag] Similar query found: '{sim_query.query}' (similarity={sim_query.similarity:.4f})")
-        print(f"[rag]   Good sources: {len(sim_query.good_video_ids)}, Bad sources: {len(sim_query.bad_video_ids)}")
-        good_video_ids_from_past.update(sim_query.good_video_ids)
-        bad_video_ids_from_past.update(sim_query.bad_video_ids)
+        print(f"[rag]   Similar query: '{sim_query.query}' (similarity={sim_query.similarity:.4f})")
+        liked_from_queries.update(sim_query.good_video_ids)
+        disliked_from_queries.update(sim_query.bad_video_ids)
     
-    exclude_video_ids = good_video_ids_from_past | bad_video_ids_from_past
-    print(f"[rag] Excluding {len(exclude_video_ids)} already-retrieved videos from search")
-    print(f"[rag]   {len(good_video_ids_from_past)} good sources to include in context")
-    print(f"[rag]   {len(bad_video_ids_from_past)} bad sources to exclude")
+    # Combine all exclusions (optimization: don't search for videos we already know about)
+    exclude_video_ids = (
+        set(liked_from_collections.keys()) | 
+        set(disliked_from_collections.keys()) |
+        liked_from_queries |
+        disliked_from_queries
+    )
     
-    # Step 1+2: Retrieve and rerank using search endpoint (with exclusions)
+    print(f"[rag] Total exclusions from search: {len(exclude_video_ids)}")
+    print(f"[rag]   Liked from collections: {len(liked_from_collections)}")
+    print(f"[rag]   Disliked from collections: {len(disliked_from_collections)}")
+    print(f"[rag]   Liked from queries: {len(liked_from_queries)}")
+    print(f"[rag]   Disliked from queries: {len(disliked_from_queries)}")
+    
+    # Build excluded videos list for response
+    for video_id, collection_query in liked_from_collections.items():
+        video = db.get(Video, video_id)
+        excluded_videos_list.append(ExcludedVideo(
+            video_id=video_id,
+            title=video.title if video else None,
+            reason="liked_in_collection",
+            source_reference=collection_query
+        ))
+    
+    for video_id, collection_query in disliked_from_collections.items():
+        video = db.get(Video, video_id)
+        excluded_videos_list.append(ExcludedVideo(
+            video_id=video_id,
+            title=video.title if video else None,
+            reason="disliked_in_collection",
+            source_reference=collection_query
+        ))
+    
+    for video_id in disliked_from_queries:
+        if video_id not in disliked_from_collections:  # Avoid duplicates
+            video = db.get(Video, video_id)
+            excluded_videos_list.append(ExcludedVideo(
+                video_id=video_id,
+                title=video.title if video else None,
+                reason="bad_feedback",
+                source_reference="similar_query"
+            ))
+    
+    # Step 3: Perform new search (excluding already-known videos)
+    print(f"[rag] Step 3: Performing search (excluding {len(exclude_video_ids)} videos)...")
     search_req = SearchRequest(query=payload.query, k=payload.k_final * 2, k_ann=payload.k_ann)
     search_result = search_videos(search_req, db)
     
-    # Filter out excluded videos from new search results
+    # Filter out excluded videos
     filtered_hits = [hit for hit in search_result.hits if hit.video_id not in exclude_video_ids]
-    print(f"[rag] Filtered search results: {len(filtered_hits)} results (from {len(search_result.hits)} original)")
+    print(f"[rag]   Filtered to {len(filtered_hits)} new results (from {len(search_result.hits)} original)")
     
-    # Step 2: Fetch good sources from similar queries
-    good_sources_from_past = []
-    if good_video_ids_from_past:
-        print(f"[rag] Fetching {len(good_video_ids_from_past)} good sources from past queries...")
-        for video_id in good_video_ids_from_past:
-            video = db.get(Video, video_id)
-            transcript = db.get(Transcript, video_id)
-            if video is not None and transcript is not None:
-                transcript_text = getattr(transcript, 'text', '') or ''
-                snippet = transcript_text[:200] + "..." if len(transcript_text) > 200 else transcript_text
-                good_sources_from_past.append(SearchHit(
-                    video_id=getattr(video, 'id'),
-                    title=getattr(video, 'title', None),
-                    author=getattr(video, 'author', None),
-                    url=getattr(video, 'url'),
-                    score=1.0,  # High confidence from past feedback
+    # Step 4: Fetch liked videos from collections to include in context
+    sources_from_collections = []
+    for video_id, collection_query in liked_from_collections.items():
+        video = db.get(Video, video_id)
+        transcript = db.get(Transcript, video_id)
+        if video and transcript:
+            transcript_text = transcript.text or ''
+            snippet = transcript_text[:200] + "..." if len(transcript_text) > 200 else transcript_text
+            sources_from_collections.append({
+                'hit': SearchHit(
+                    video_id=video.id,
+                    title=video.title,
+                    author=video.author,
+                    url=video.url,
+                    score=1.0,
                     snippet=snippet,
-                    media_path=getattr(video, 'media_path', None),
-                    source=getattr(video, 'source', None),
-                    description=getattr(video, 'description', None)
-                ))
+                    media_path=video.media_path,
+                    source=video.source,
+                    description=video.description
+                ),
+                'source_type': 'collection',
+                'reference': collection_query
+            })
     
-    # Combine: good sources from past + new filtered search results
-    all_hits = good_sources_from_past + filtered_hits
-    top_hits = all_hits[:payload.k_final]
+    print(f"[rag]   Pulled {len(sources_from_collections)} liked videos from collections")
     
-    if not top_hits:
+    # Step 5: Fetch liked videos from similar queries
+    sources_from_queries = []
+    for video_id in liked_from_queries:
+        if video_id in liked_from_collections:
+            continue  # Already included
+        video = db.get(Video, video_id)
+        transcript = db.get(Transcript, video_id)
+        if video and transcript:
+            transcript_text = transcript.text or ''
+            snippet = transcript_text[:200] + "..." if len(transcript_text) > 200 else transcript_text
+            sources_from_queries.append({
+                'hit': SearchHit(
+                    video_id=video.id,
+                    title=video.title,
+                    author=video.author,
+                    url=video.url,
+                    score=1.0,
+                    snippet=snippet,
+                    media_path=video.media_path,
+                    source=video.source,
+                    description=video.description
+                ),
+                'source_type': 'feedback',
+                'reference': 'similar_query'
+            })
+    
+    print(f"[rag]   Pulled {len(sources_from_queries)} liked videos from queries")
+    
+    # Combine all sources: collection sources + query sources + new search results
+    all_sources = []
+    
+    # Priority 1: Sources from collections (user explicitly liked in related searches)
+    for src in sources_from_collections:
+        all_sources.append(src)
+    
+    # Priority 2: Sources from queries (implicit positive feedback)
+    for src in sources_from_queries:
+        all_sources.append(src)
+    
+    # Priority 3: New search results
+    for hit in filtered_hits:
+        all_sources.append({
+            'hit': hit,
+            'source_type': 'search',
+            'reference': None
+        })
+    
+    # Take top k_final
+    top_sources = all_sources[:payload.k_final]
+    
+    if not top_sources:
         print(f"[rag] No results found after filtering")
         return RAGResponse(
             query=payload.query,
             answer="I couldn't find any relevant information in the video database to answer your question.",
-            sources=[]
+            sources=[],
+            excluded_videos=excluded_videos_list
         )
     
-    print(f"[rag] Using {len(top_hits)} sources for answer generation ({len(good_sources_from_past)} from past, {len(filtered_hits[:payload.k_final-len(good_sources_from_past)])} new)")
+    print(f"[rag] Using {len(top_sources)} sources for answer generation")
+    print(f"[rag]   From collections: {len(sources_from_collections)}")
+    print(f"[rag]   From queries: {len(sources_from_queries)}")
+    print(f"[rag]   From new search: {len([s for s in top_sources if s['source_type'] == 'search'])}")
     
-    # Step 3: Build context with numbered sources
+    # Step 6: Build context with numbered sources
     context_parts = []
-    sources = []
+    rag_sources = []
     
-    for idx, hit in enumerate(top_hits, 1):
+    for idx, src_data in enumerate(top_sources, 1):
+        hit = src_data['hit']
+        source_type = src_data['source_type']
+        reference = src_data['reference']
+        
         title = hit.title or 'Untitled'
         title_display = title[:40] if len(title) > 40 else title
-        print(f"[rag] Source [{idx}]: video_id={hit.video_id[:16]}..., score={hit.score:.4f}, title={title_display}")
+        
+        source_marker = ""
+        if source_type == 'collection':
+            source_marker = f" [from collection: '{reference}']"
+        elif source_type == 'feedback':
+            source_marker = " [from similar query feedback]"
+        
+        print(f"[rag] Source [{idx}]: video_id={hit.video_id[:16]}..., score={hit.score:.4f}, title={title_display}, type={source_type}{source_marker}")
         
         # Get full transcript
         transcript_obj = db.get(Transcript, hit.video_id)
-        transcript_text: str = hit.snippet  # default
+        transcript_text = hit.snippet  # default (fallback if no transcript found)
+        
         if transcript_obj:
-            text_val = transcript_obj.text
+            text_val = getattr(transcript_obj, 'text', None)
             if text_val is not None:
                 transcript_text = str(text_val)
+                print(f"[rag]   Using full transcript ({len(transcript_text)} chars)")
+            else:
+                print(f"[rag]   WARNING: Transcript object exists but has no text, using snippet ({len(transcript_text)} chars)")
+        else:
+            print(f"[rag]   WARNING: No transcript found for video {hit.video_id[:16]}..., using snippet ({len(transcript_text)} chars)")
         
         # Truncate very long transcripts
         original_len = len(transcript_text)
@@ -335,19 +491,21 @@ def rag_answer(payload: RAGRequest, db: Session = Depends(get_db)):
         
         context_parts.append(f"[Source {idx}] {hit.title or 'Untitled'}\n{transcript_text}\n")
         
-        sources.append(RAGSource(
+        rag_sources.append(RAGSource(
             video_id=hit.video_id,
             title=hit.title,
             author=hit.author,
             url=hit.url,
             snippet=hit.snippet,
-            score=hit.score
+            score=hit.score,
+            source_type=source_type,
+            source_reference=reference
         ))
     
     context = "\n\n".join(context_parts)
-    print(f"[rag] Built context with {len(context)} characters from {len(sources)} sources")
+    print(f"[rag] Built context with {len(context)} characters from {len(rag_sources)} sources")
     
-    # Step 4: Generate answer with Gemini
+    # Step 7: Generate answer with Gemini
     print(f"[rag] Generating answer with Gemini...")
     prompt = f"""You are a helpful assistant that answers questions based on video transcripts.
 
@@ -388,13 +546,14 @@ Answer:"""
         traceback.print_exc()
         raise HTTPException(500, f"Failed to generate answer: {e}")
     
-    print(f"[rag] Returning answer with {len(sources)} sources")
+    print(f"[rag] Returning answer with {len(rag_sources)} sources and {len(excluded_videos_list)} excluded videos")
     print(f"[rag] ========== RAG COMPLETE ==========\n")
     
     return RAGResponse(
         query=payload.query,
         answer=answer,
-        sources=sources
+        sources=rag_sources,
+        excluded_videos=excluded_videos_list
     )
 
 
@@ -514,6 +673,7 @@ def save_retrieval_feedback(payload: FeedbackRequest, db: Session = Depends(get_
     """
     Save feedback (good/bad) for a retrieved source.
     This helps the system learn which sources are relevant for specific queries.
+    Updates existing feedback if the same query+video_id combination exists.
     """
     print(f"[feedback] Saving feedback: query='{payload.query}', video_id={payload.video_id}, feedback={payload.feedback}")
     
@@ -527,22 +687,74 @@ def save_retrieval_feedback(payload: FeedbackRequest, db: Session = Depends(get_
         print(f"[feedback][ERROR] Failed to generate query embedding: {e}")
         raise HTTPException(500, f"Failed to generate query embedding: {e}")
     
-    # Save feedback
+    # Check if feedback already exists for this query+video combination
     try:
-        feedback = RetrievalFeedback(
-            query=payload.query,
-            query_embedding=query_embedding,
-            video_id=payload.video_id,
-            feedback=payload.feedback
-        )
-        db.add(feedback)
+        existing_feedback = db.query(RetrievalFeedback).filter(
+            RetrievalFeedback.query == payload.query,
+            RetrievalFeedback.video_id == payload.video_id
+        ).first()
+        
+        if existing_feedback:
+            # Update existing feedback
+            print(f"[feedback] Updating existing feedback from '{existing_feedback.feedback}' to '{payload.feedback}'")
+            existing_feedback.feedback = payload.feedback
+            existing_feedback.query_embedding = query_embedding
+        else:
+            # Create new feedback
+            print(f"[feedback] Creating new feedback record")
+            feedback = RetrievalFeedback(
+                query=payload.query,
+                query_embedding=query_embedding,
+                video_id=payload.video_id,
+                feedback=payload.feedback
+            )
+            db.add(feedback)
+        
         db.commit()
         print(f"[feedback] Feedback saved successfully")
         return {"status": "success", "message": "Feedback saved"}
     except Exception as e:
         db.rollback()
         print(f"[feedback][ERROR] Failed to save feedback: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(500, f"Failed to save feedback: {e}")
+
+
+class DeleteFeedbackRequest(BaseModel):
+    query: str = Field(..., description="The search query")
+    video_id: str = Field(..., description="Video ID to delete feedback for")
+
+
+@router.delete("/feedback", status_code=200)
+def delete_retrieval_feedback(payload: DeleteFeedbackRequest, db: Session = Depends(get_db)):
+    """
+    Delete feedback for a specific query+video combination.
+    Used when user wants to unselect/remove their feedback.
+    """
+    print(f"[feedback-delete] Deleting feedback: query='{payload.query}', video_id={payload.video_id}")
+    
+    try:
+        # Find and delete the feedback
+        deleted_count = db.query(RetrievalFeedback).filter(
+            RetrievalFeedback.query == payload.query,
+            RetrievalFeedback.video_id == payload.video_id
+        ).delete()
+        
+        db.commit()
+        
+        if deleted_count > 0:
+            print(f"[feedback-delete] Successfully deleted {deleted_count} feedback record(s)")
+            return {"status": "success", "message": "Feedback deleted", "deleted": deleted_count}
+        else:
+            print(f"[feedback-delete] No feedback found to delete")
+            return {"status": "success", "message": "No feedback found", "deleted": 0}
+    except Exception as e:
+        db.rollback()
+        print(f"[feedback-delete][ERROR] Failed to delete feedback: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"Failed to delete feedback: {e}")
 
 
 class GetFeedbackRequest(BaseModel):

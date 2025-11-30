@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { searchVideos, ragAnswer, getStreamUrl, getTranscript, getVideoMeta, listTranscripts, saveCollection, saveRetrievalFeedback, getRetrievalFeedback, findSimilarCollections, type SearchHit, type RAGResponse, type SimilarCollectionResult } from '../api';
+import { searchVideos, ragAnswer, getStreamUrl, getTranscript, getVideoMeta, listTranscripts, saveCollection, saveRetrievalFeedback, deleteRetrievalFeedback, getRetrievalFeedback, findSimilarCollections, type SearchHit, type RAGResponse, type SimilarCollectionResult } from '../api';
 import VideoPlayer from '../components/VideoPlayer';
 import TranscriptViewer from '../components/TranscriptViewer';
 import VideoMetadata from '../components/VideoMetadata';
@@ -41,23 +41,99 @@ export default function SearchPage() {
   const [feedback, setFeedback] = useState<{[videoId: string]: 'good' | 'bad' | null}>({});
   const [feedbackSubmitting, setFeedbackSubmitting] = useState<{[videoId: string]: boolean}>({});
   
+  // Collection feedback state (keyed by collectionId-videoId)
+  const [collectionFeedback, setCollectionFeedback] = useState<{[key: string]: 'good' | 'bad' | null}>({});
+  const [collectionFeedbackSubmitting, setCollectionFeedbackSubmitting] = useState<{[key: string]: boolean}>({});
+  
   // References for scrolling
   const sourceRefs = useRef<{[key: string]: HTMLDivElement | null}>({});
 
-  async function handleFeedback(videoId: string, feedbackType: 'good' | 'bad') {
-    if (!query.trim()) return;
+  function handleFeedback(videoId: string, feedbackType: 'good' | 'bad') {
+    // Toggle behavior: if clicking the same feedback, unselect it
+    // If clicking opposite feedback, switch to it
+    setFeedback(prev => {
+      const currentFeedback = prev[videoId] || null; // Normalize undefined to null
+      
+      console.log(`[handleFeedback] videoId: ${videoId}, feedbackType: ${feedbackType}, currentFeedback: ${currentFeedback}`);
+      console.log(`[handleFeedback] Full feedback state before:`, prev);
+      
+      // If clicking the same feedback type, unselect it (remove from object)
+      if (currentFeedback === feedbackType) {
+        console.log(`Feedback unselected: ${feedbackType} for video ${videoId}`);
+        const newState = { ...prev };
+        delete newState[videoId]; // Remove the key entirely instead of setting to null
+        console.log(`[handleFeedback] New feedback state:`, newState);
+        return newState;
+      }
+      
+      // Otherwise, set to new feedback type
+      console.log(`Feedback selected: ${feedbackType} for video ${videoId}`);
+      const newState = { ...prev, [videoId]: feedbackType };
+      console.log(`[handleFeedback] New feedback state:`, newState);
+      return newState;
+    });
+  }
+
+  async function handleCollectionFeedback(collectionId: string, collectionQuery: string, videoId: string, feedbackType: 'good' | 'bad') {
+    const key = `${collectionId}-${videoId}`;
+    const currentFeedback = collectionFeedback[key];
     
-    setFeedbackSubmitting(prev => ({ ...prev, [videoId]: true }));
+    console.log(`[handleCollectionFeedback] CALLED`);
+    console.log(`  collectionId: ${collectionId}`);
+    console.log(`  videoId: ${videoId}`);
+    console.log(`  feedbackType: ${feedbackType}`);
+    console.log(`  key: ${key}`);
+    console.log(`  currentFeedback: ${currentFeedback}`);
+    console.log(`  currentFeedback === feedbackType: ${currentFeedback === feedbackType}`);
+    console.log(`  Full collectionFeedback state:`, collectionFeedback);
+    
+    // Toggle behavior: if clicking the same feedback, unselect it (delete)
+    if (currentFeedback === feedbackType) {
+      console.log(`⚡ TOGGLING OFF: ${feedbackType} for video ${videoId}`);
+      
+      setCollectionFeedbackSubmitting(prev => ({ ...prev, [key]: true }));
+      
+      try {
+        // Delete the feedback from database
+        await deleteRetrievalFeedback(collectionQuery, videoId);
+        console.log(`✅ API call successful - feedback deleted from DB`);
+        
+        // Remove from UI state
+        setCollectionFeedback(prev => {
+          const newState = { ...prev };
+          delete newState[key];
+          console.log(`✅ State updated - key ${key} deleted. New state:`, newState);
+          return newState;
+        });
+        console.log(`Collection feedback deleted for video ${videoId} in collection ${collectionId}`);
+      } catch (e) {
+        console.error('❌ Failed to delete collection feedback:', e);
+        alert(`Failed to delete feedback: ${e}`);
+      } finally {
+        setCollectionFeedbackSubmitting(prev => ({ ...prev, [key]: false }));
+      }
+      
+      return;
+    }
+    
+    // Otherwise, save or switch to new feedback type
+    console.log(`⚡ SAVING/SWITCHING: ${feedbackType} for video ${videoId}`);
+    setCollectionFeedbackSubmitting(prev => ({ ...prev, [key]: true }));
     
     try {
-      await saveRetrievalFeedback(query, videoId, feedbackType);
-      setFeedback(prev => ({ ...prev, [videoId]: feedbackType }));
-      console.log(`Feedback saved: ${feedbackType} for video ${videoId}`);
+      await saveRetrievalFeedback(collectionQuery, videoId, feedbackType);
+      console.log(`✅ API call successful - feedback saved to DB`);
+      setCollectionFeedback(prev => {
+        const newState = { ...prev, [key]: feedbackType };
+        console.log(`✅ State updated - key ${key} = ${feedbackType}. New state:`, newState);
+        return newState;
+      });
+      console.log(`Collection feedback saved: ${feedbackType} for video ${videoId} in collection ${collectionId}`);
     } catch (e) {
-      console.error('Failed to save feedback:', e);
+      console.error('Failed to save collection feedback:', e);
       alert(`Failed to save feedback: ${e}`);
     } finally {
-      setFeedbackSubmitting(prev => ({ ...prev, [videoId]: false }));
+      setCollectionFeedbackSubmitting(prev => ({ ...prev, [key]: false }));
     }
   }
 
@@ -69,6 +145,7 @@ export default function SearchPage() {
     setRagResponse(null);
     setSelectedVideo(null);
     setSimilarCollections([]);
+    setFeedback({}); // Reset feedback for new search - only saved collections keep feedback
     
     try {
       // Find similar collections
@@ -78,34 +155,39 @@ export default function SearchPage() {
       
       // Auto-expand the first (most similar) collection if found
       if (collectionsResult.collections.length > 0) {
-        setExpandedCollectionIds(new Set([collectionsResult.collections[0].id]));
+        const firstCollection = collectionsResult.collections[0];
+        setExpandedCollectionIds(new Set([firstCollection.id]));
+        
+        // Load feedback for the first collection
+        if (firstCollection.videos.length > 0) {
+          try {
+            const videoIds = firstCollection.videos.map(v => v.id);
+            const feedbackResponse = await getRetrievalFeedback(firstCollection.query, videoIds);
+            
+            const newFeedback: {[key: string]: 'good' | 'bad' | null} = {};
+            feedbackResponse.feedback.forEach(fb => {
+              const key = `${firstCollection.id}-${fb.video_id}`;
+              newFeedback[key] = fb.feedback;
+            });
+            
+            setCollectionFeedback(newFeedback);
+            console.log(`[search] Loaded ${feedbackResponse.feedback.length} feedback records for first collection`);
+          } catch (error) {
+            console.error('[search] Failed to load feedback for first collection:', error);
+          }
+        }
       }
       
       // If generateAnswer is checked AND no similar collections found, generate new answer automatically
       if (generateAnswer && collectionsResult.collections.length === 0) {
         setGenerating(true);
         try {
-          const result = await ragAnswer(query, 20, 5);
+          // Pass empty array since no similar collections
+          const result = await ragAnswer(query, 20, 5, []);
           setRagResponse(result);
           
-          // Load existing feedback for these sources
-          if (result.sources && result.sources.length > 0) {
-            const videoIds = result.sources.map(s => s.video_id);
-            try {
-              const feedbackResponse = await getRetrievalFeedback(query, videoIds);
-              
-              // Convert feedback array to object for easy lookup
-              const feedbackMap: {[videoId: string]: 'good' | 'bad' | null} = {};
-              feedbackResponse.feedback.forEach(fb => {
-                feedbackMap[fb.video_id] = fb.feedback;
-              });
-              
-              setFeedback(feedbackMap);
-              console.log(`[search] Loaded ${feedbackResponse.feedback.length} feedback records`);
-            } catch (error) {
-              console.error('[search] Failed to load feedback:', error);
-            }
-          }
+          // Don't load existing feedback - feedback should only be visible after collection is saved
+          // User will set feedback during this session, and it will be saved when they save the collection
         } catch (e) {
           console.error('RAG generation failed:', e);
           alert(`Answer generation failed: ${e}`);
@@ -133,27 +215,14 @@ export default function SearchPage() {
     setGenerating(true);
     
     try {
-      const result = await ragAnswer(query, 20, 5);
+      // Pass similar collection IDs to use their feedback
+      const collectionIds = similarCollections.map(c => c.id);
+      console.log(`[handleGenerateNewAnswer] Calling ragAnswer with ${collectionIds.length} collection IDs:`, collectionIds);
+      const result = await ragAnswer(query, 20, 5, collectionIds);
       setRagResponse(result);
       
-      // Load existing feedback for these sources
-      if (result.sources && result.sources.length > 0) {
-        const videoIds = result.sources.map(s => s.video_id);
-        try {
-          const feedbackResponse = await getRetrievalFeedback(query, videoIds);
-          
-          // Convert feedback array to object for easy lookup
-          const feedbackMap: {[videoId: string]: 'good' | 'bad' | null} = {};
-          feedbackResponse.feedback.forEach(fb => {
-            feedbackMap[fb.video_id] = fb.feedback;
-          });
-          
-          setFeedback(feedbackMap);
-          console.log(`[search] Loaded ${feedbackResponse.feedback.length} feedback records`);
-        } catch (error) {
-          console.error('[search] Failed to load feedback:', error);
-        }
-      }
+      // Don't load existing feedback - feedback should only be visible after collection is saved
+      // User will set feedback during this session, and it will be saved when they save the collection
     } catch (e) {
       console.error('RAG generation failed:', e);
       alert(`Answer generation failed: ${e}`);
@@ -162,7 +231,9 @@ export default function SearchPage() {
     }
   }
 
-  function toggleCollectionExpand(collectionId: string) {
+  async function toggleCollectionExpand(collectionId: string) {
+    const isExpanding = !expandedCollectionIds.has(collectionId);
+    
     setExpandedCollectionIds(prev => {
       const newSet = new Set(prev);
       if (newSet.has(collectionId)) {
@@ -172,6 +243,29 @@ export default function SearchPage() {
       }
       return newSet;
     });
+    
+    // Load feedback when expanding
+    if (isExpanding) {
+      const collection = similarCollections.find(c => c.id === collectionId);
+      if (collection && collection.videos.length > 0) {
+        try {
+          const videoIds = collection.videos.map(v => v.id);
+          const feedbackResponse = await getRetrievalFeedback(collection.query, videoIds);
+          
+          // Store feedback with collectionId-videoId key
+          const newFeedback: {[key: string]: 'good' | 'bad' | null} = {};
+          feedbackResponse.feedback.forEach(fb => {
+            const key = `${collectionId}-${fb.video_id}`;
+            newFeedback[key] = fb.feedback;
+          });
+          
+          setCollectionFeedback(prev => ({ ...prev, ...newFeedback }));
+          console.log(`[collection] Loaded ${feedbackResponse.feedback.length} feedback records for collection ${collectionId}`);
+        } catch (error) {
+          console.error('[collection] Failed to load feedback:', error);
+        }
+      }
+    }
   }
 
   async function handleSaveCollection() {
@@ -197,6 +291,22 @@ export default function SearchPage() {
         sources_count: ragResponse.sources.length,
         search_query: searchQuery,
       });
+      
+      // Now save all the feedback for videos in this collection
+      const feedbackPromises = Object.entries(feedback)
+        .filter(([videoId, feedbackType]) => {
+          // Only save feedback that is not null and for videos in this collection
+          return feedbackType !== null && videoIds.includes(videoId);
+        })
+        .map(([videoId, feedbackType]) => {
+          console.log(`Saving feedback for video ${videoId}: ${feedbackType}`);
+          return saveRetrievalFeedback(query, videoId, feedbackType as 'good' | 'bad');
+        });
+      
+      if (feedbackPromises.length > 0) {
+        await Promise.all(feedbackPromises);
+        console.log(`Saved ${feedbackPromises.length} feedback records with collection`);
+      }
       
       alert('✅ Collection saved successfully!');
     } catch (e) {
@@ -693,7 +803,14 @@ export default function SearchPage() {
                           <span>Sources ({collection.videos.length})</span>
                         </h4>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                          {collection.videos.map((video, vidIdx) => (
+                          {collection.videos.map((video, vidIdx) => {
+                            const feedbackKey = `${collection.id}-${video.id}`;
+                            const videoFeedback = collectionFeedback[feedbackKey];
+                            const isSubmitting = collectionFeedbackSubmitting[feedbackKey];
+                            
+                            console.log(`[Render] Collection video ${video.id}: feedbackKey=${feedbackKey}, videoFeedback=${videoFeedback}, isSubmitting=${isSubmitting}`);
+                            
+                            return (
                             <div
                               key={video.id}
                               onClick={() => {
@@ -711,6 +828,18 @@ export default function SearchPage() {
                                 };
                                 handleVideoClick(hit);
                               }}
+                              onMouseEnter={(e) => {
+                                e.currentTarget.style.borderColor = '#3b82f6';
+                                e.currentTarget.style.background = '#1f2937';
+                                const feedbackButtons = e.currentTarget.querySelector('.collection-feedback-buttons') as HTMLElement;
+                                if (feedbackButtons) feedbackButtons.style.opacity = '1';
+                              }}
+                              onMouseLeave={(e) => {
+                                e.currentTarget.style.borderColor = '#334155';
+                                e.currentTarget.style.background = '#1e293b';
+                                const feedbackButtons = e.currentTarget.querySelector('.collection-feedback-buttons') as HTMLElement;
+                                if (feedbackButtons) feedbackButtons.style.opacity = '0';
+                              }}
                               style={{
                                 padding: 16,
                                 background: '#1e293b',
@@ -718,16 +847,99 @@ export default function SearchPage() {
                                 borderRadius: 8,
                                 cursor: 'pointer',
                                 transition: 'all 0.2s ease',
-                              }}
-                              onMouseEnter={(e) => {
-                                e.currentTarget.style.borderColor = '#3b82f6';
-                                e.currentTarget.style.background = '#1f2937';
-                              }}
-                              onMouseLeave={(e) => {
-                                e.currentTarget.style.borderColor = '#334155';
-                                e.currentTarget.style.background = '#1e293b';
+                                position: 'relative',
                               }}
                             >
+                              {/* Feedback buttons (shown on hover) - positioned on right below match score */}
+                              <div
+                                style={{
+                                  position: 'absolute',
+                                  top: 48,
+                                  right: 12,
+                                  display: 'flex',
+                                  gap: 6,
+                                  opacity: 0,
+                                  transition: 'opacity 0.2s ease',
+                                  pointerEvents: 'auto',
+                                  zIndex: 10,
+                                }}
+                                className="collection-feedback-buttons"
+                                onMouseEnter={(e) => {
+                                  e.currentTarget.style.opacity = '1';
+                                }}
+                              >
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleCollectionFeedback(collection.id, collection.query, video.id, 'good');
+                                  }}
+                                  disabled={isSubmitting}
+                                  style={{
+                                    background: videoFeedback === 'good' ? '#10b981' : '#1f2937',
+                                    border: '1px solid ' + (videoFeedback === 'good' ? '#10b981' : '#374151'),
+                                    color: videoFeedback === 'good' ? 'white' : '#9ca3af',
+                                    padding: '4px 8px',
+                                    borderRadius: 4,
+                                    cursor: isSubmitting ? 'wait' : 'pointer',
+                                    fontSize: 14,
+                                    lineHeight: 1,
+                                    transition: 'all 0.2s ease',
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    if (videoFeedback !== 'good') {
+                                      e.currentTarget.style.background = '#10b981';
+                                      e.currentTarget.style.borderColor = '#10b981';
+                                      e.currentTarget.style.color = 'white';
+                                    }
+                                  }}
+                                  onMouseLeave={(e) => {
+                                    if (videoFeedback !== 'good') {
+                                      e.currentTarget.style.background = '#1f2937';
+                                      e.currentTarget.style.borderColor = '#374151';
+                                      e.currentTarget.style.color = '#9ca3af';
+                                    }
+                                  }}
+                                  title="Good retrieve"
+                                >
+                                  👍
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleCollectionFeedback(collection.id, collection.query, video.id, 'bad');
+                                  }}
+                                  disabled={isSubmitting}
+                                  style={{
+                                    background: videoFeedback === 'bad' ? '#ef4444' : '#1f2937',
+                                    border: '1px solid ' + (videoFeedback === 'bad' ? '#ef4444' : '#374151'),
+                                    color: videoFeedback === 'bad' ? 'white' : '#9ca3af',
+                                    padding: '4px 8px',
+                                    borderRadius: 4,
+                                    cursor: isSubmitting ? 'wait' : 'pointer',
+                                    fontSize: 14,
+                                    lineHeight: 1,
+                                    transition: 'all 0.2s ease',
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    if (videoFeedback !== 'bad') {
+                                      e.currentTarget.style.background = '#ef4444';
+                                      e.currentTarget.style.borderColor = '#ef4444';
+                                      e.currentTarget.style.color = 'white';
+                                    }
+                                  }}
+                                  onMouseLeave={(e) => {
+                                    if (videoFeedback !== 'bad') {
+                                      e.currentTarget.style.background = '#1f2937';
+                                      e.currentTarget.style.borderColor = '#374151';
+                                      e.currentTarget.style.color = '#9ca3af';
+                                    }
+                                  }}
+                                  title="Bad retrieve"
+                                >
+                                  👎
+                                </button>
+                              </div>
+                              
                               <div style={{
                                 display: 'flex',
                                 justifyContent: 'space-between',
@@ -798,7 +1010,8 @@ export default function SearchPage() {
                                 </div>
                               )}
                             </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       </>
                     )}
@@ -955,7 +1168,7 @@ export default function SearchPage() {
                   {/* Video card content */}
                   <div>
                     <div className="row" style={{ marginBottom: 8, justifyContent: 'space-between' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                         <span style={{
                           background: '#2563eb',
                           color: 'white',
@@ -967,6 +1180,23 @@ export default function SearchPage() {
                           [{idx + 1}]
                         </span>
                         <h4 style={{ margin: 0, fontSize: 16 }}>{source.title || 'Untitled Video'}</h4>
+                        
+                        {/* Source type badge */}
+                        {source.source_type && source.source_type !== 'search' && (
+                          <span style={{
+                            background: source.source_type === 'collection' ? '#10b981' : '#f59e0b',
+                            color: 'white',
+                            padding: '3px 8px',
+                            borderRadius: 4,
+                            fontSize: 11,
+                            fontWeight: 600,
+                          }}
+                          title={source.source_reference || undefined}
+                          >
+                            {source.source_type === 'collection' ? '📁 From Collection' : '⭐ From Feedback'}
+                            {source.source_reference && `: "${source.source_reference}"`}
+                          </span>
+                        )}
                       </div>
                       <span style={{
                         color: '#10b981',
@@ -1048,6 +1278,83 @@ export default function SearchPage() {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Excluded Videos Section */}
+      {ragResponse && ragResponse.excluded_videos && ragResponse.excluded_videos.length > 0 && (
+        <div className="card" style={{ background: '#1e1b26', border: '1px solid #4b5563' }}>
+          <details>
+            <summary style={{
+              cursor: 'pointer',
+              fontSize: 16,
+              fontWeight: 600,
+              color: '#9ca3af',
+              userSelect: 'none',
+              padding: '4px 0',
+            }}>
+              🚫 Excluded from Search ({ragResponse.excluded_videos.length} videos)
+            </summary>
+            
+            <p className="muted" style={{ fontSize: 13, marginTop: 12, marginBottom: 16 }}>
+              These videos were excluded from the new search to optimize performance. 
+              They were already known from similar collections or past feedback.
+            </p>
+            
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 16 }}>
+              {ragResponse.excluded_videos.map((excluded) => (
+                <div
+                  key={excluded.video_id}
+                  style={{
+                    padding: 12,
+                    background: '#0f0d14',
+                    border: '1px solid #374151',
+                    borderRadius: 6,
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+                    <div style={{ flex: 1 }}>
+                      <h5 style={{ margin: '0 0 4px 0', fontSize: 14, color: '#d1d5db' }}>
+                        {excluded.title || 'Untitled Video'}
+                      </h5>
+                      <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+                        {excluded.video_id}
+                      </p>
+                    </div>
+                    
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+                      {/* Reason badge */}
+                      <span style={{
+                        background: excluded.reason === 'liked_in_collection' ? '#10b981' : 
+                                   excluded.reason === 'disliked_in_collection' ? '#ef4444' : '#f59e0b',
+                        color: 'white',
+                        padding: '3px 8px',
+                        borderRadius: 4,
+                        fontSize: 11,
+                        fontWeight: 600,
+                        whiteSpace: 'nowrap',
+                      }}>
+                        {excluded.reason === 'liked_in_collection' ? '👍 Liked' :
+                         excluded.reason === 'disliked_in_collection' ? '👎 Disliked' : '⚠️ Bad Feedback'}
+                      </span>
+                      
+                      {/* Reference */}
+                      {excluded.source_reference && excluded.source_reference !== 'similar_query' && (
+                        <span style={{
+                          fontSize: 11,
+                          color: '#9ca3af',
+                          fontStyle: 'italic',
+                          textAlign: 'right',
+                        }}>
+                          from: "{excluded.source_reference}"
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </details>
         </div>
       )}
 

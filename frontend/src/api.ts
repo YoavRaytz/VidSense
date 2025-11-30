@@ -201,11 +201,11 @@ export async function searchVideos(query: string, k: number = 10, k_ann?: number
   });
 }
 
-export async function ragAnswer(query: string, k_ann: number = 20, k_final: number = 5) {
+export async function ragAnswer(query: string, k_ann: number = 20, k_final: number = 5, similar_collection_ids: string[] = []) {
   return jsonFetch<RAGResponse>(`${API_BASE}/search/rag`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, k_ann, k_final }),
+    body: JSON.stringify({ query, k_ann, k_final, similar_collection_ids }),
   });
 }
 
@@ -286,6 +286,25 @@ export async function saveRetrievalFeedback(query: string, videoId: string, feed
   });
 }
 
+export async function deleteRetrievalFeedback(query: string, videoId: string) {
+  return jsonFetch<{ status: string; message: string; deleted: number }>(`${API_BASE}/search/feedback`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      query,
+      video_id: videoId,
+    }),
+  });
+}
+
+export async function findSimilarQueries(query: string, k: number = 10, k_ann: number = 50) {
+  return jsonFetch<SimilarQueriesResponse>(`${API_BASE}/search/similar-queries`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, k, k_ann }),
+  });
+}
+
 export interface VideoFeedback {
   video_id: string;
   feedback: 'good' | 'bad';
@@ -307,46 +326,34 @@ export async function getRetrievalFeedback(query: string, videoIds: string[]) {
   });
 }
 
-export async function findSimilarQueries(query: string, k: number = 10, k_ann: number = 50) {
-  return jsonFetch<SimilarQueriesResponse>(`${API_BASE}/search/similar-queries`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, k, k_ann }),
-  });
-}
-
 export interface CollectionVideo {
   id: string;
-  title: string | null;
-  author: string | null;
+  title: string;
+  author: string;
   url: string;
-  score: number | null;
-  snippet: string | null;
-  description: string | null;
-  clip_count: number | null;
-  hashtags: string[] | null;
+  snippet?: string;
+  description?: string;
+  score?: number;
 }
 
 export interface SimilarCollectionResult {
   id: string;
   query: string;
-  similarity: number;
-  ai_answer: string | null;
-  videos: CollectionVideo[];
+  answer: string;
   created_at: string;
-  metadata_json: Record<string, any>;
+  similarity: number;
+  videos: CollectionVideo[];
 }
 
-export interface SimilarCollectionsResponse {
+export interface FindSimilarCollectionsResponse {
   query: string;
   collections: SimilarCollectionResult[];
 }
 
 export async function findSimilarCollections(query: string, k: number = 10, k_ann: number = 50) {
-  return jsonFetch<SimilarCollectionsResponse>(`${API_BASE}/search/similar-collections`, {
+  return jsonFetch<FindSimilarCollectionsResponse>(`${API_BASE}/search/similar-collections`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query, k, k_ann }),
   });
 }
-
